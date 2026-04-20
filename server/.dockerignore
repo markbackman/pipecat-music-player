@@ -1,26 +1,37 @@
+# Pipecat Cloud's CLI uses Python's fnmatch to match each path component
+# against these patterns, so directory entries need to be plain names
+# (no trailing slash). "foo/" becomes a literal pattern that never
+# matches a bare "foo", which is why trailing-slash entries silently
+# do nothing in cloud builds.
+
 # Python
-__pycache__/
+__pycache__
 *.py[cod]
-*.egg-info/
-.venv/
-.ruff_cache/
+*.pyo
+*.pyd
+*.egg-info
+.venv
+venv
+env
+ENV
+
+# Tool caches
+.ruff_cache
+.pytest_cache
+.mypy_cache
 
 # Secrets (lockfile + pyproject are bind-mounted for uv sync; anything
 # else that carries creds stays out of the image)
 .env
 .env.local
 
-# Docker
-Dockerfile
-.dockerignore
-
 # VCS
-.git/
+.git
 .gitignore
 
 # Editor
-.idea/
-.vscode/
+.idea
+.vscode
 
 # OS
 .DS_Store

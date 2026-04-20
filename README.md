@@ -27,7 +27,7 @@ CatalogAgent (runner peer, long-lived)
       get_trending, get_album_preview, ...
 ```
 
-- **MusicAgent** (`server/music_agent.py`): owns the Pipecat transport, bridges frames to the voice agent, and forwards `ui_context` RTVI client messages onto the bus.
+- **MusicAgent** (`server/bot.py`): owns the Pipecat transport, bridges frames to the voice agent, and forwards `ui_context` RTVI client messages onto the bus.
 - **VoiceAgent** (`server/voice_agent.py`): bridged LLM agent. Its only tool is `handle_request`, which forwards the user's utterance verbatim to the UI agent and speaks the reply.
 - **UIAgent** (`server/ui_agent.py`): owns a navigation stack (home → artist → detail → trending) and emits `RTVIServerMessageFrame` screen updates. Routes voice requests through its own LLM, but handles client clicks directly without an LLM call for low latency.
 - **CatalogAgent** (`server/catalog_agent.py`): process-lifetime singleton that owns the Deezer-backed catalog, description cache, and Q&A inference. Everything that needs music data goes through its task API.
@@ -67,7 +67,7 @@ DAILY_API_KEY=...
 ```bash
 cd server
 uv sync
-uv run music_agent.py
+uv run bot.py
 ```
 
 Binds to `http://localhost:7860` (SmallWebRTC) by default. Pass `--transport daily` for a Daily room.
@@ -97,6 +97,6 @@ Open http://localhost:5173, click **Connect**, and start talking.
 ## Reference patterns
 
 - **Voice/UI split via task dispatch**: `voice_agent.py` uses `async with self.task("ui", payload={"query": query})` to hand the user's utterance to `ui_agent.py`.
-- **Custom bus message for client clicks**: `messages.py` defines `BusUIContextMessage`; `music_agent.py` publishes it on the bus from the RTVI listener; `ui_agent.on_bus_message` spawns a separate asyncio task to handle each event so the dispatcher doesn't deadlock on cross-agent task responses.
+- **Custom bus message for client clicks**: `messages.py` defines `BusUIContextMessage`; `bot.py` publishes it on the bus from the RTVI listener; `ui_agent.on_bus_message` spawns a separate asyncio task to handle each event so the dispatcher doesn't deadlock on cross-agent task responses.
 - **Long-lived singleton agent**: `CatalogAgent` is spawned as a runner peer (not per-connect) so its Deezer cache survives across clients and its expensive warm-up runs once per process.
 - **Tool-invoked inference**: `answer_about_catalog` and `answer_about_music` make their own OpenAI calls inside the tool body, grounded by the structured artist data, so the UI LLM stays focused on routing.
