@@ -1,4 +1,4 @@
-import { StrictMode } from "react";
+import { StrictMode, useState } from "react";
 import { createRoot } from "react-dom/client";
 
 import type { PipecatBaseChildProps } from "@pipecat-ai/voice-ui-kit";
@@ -9,15 +9,20 @@ import {
 } from "@pipecat-ai/voice-ui-kit";
 
 import { App } from "./App";
+import { DEFAULT_TRANSPORT, TRANSPORT_CONFIG } from "./config";
+import type { TransportType } from "./config";
 
 import "./index.css";
 
-createRoot(document.getElementById("root")!).render(
-  <StrictMode>
+function Main() {
+  const [transportType] = useState<TransportType>(DEFAULT_TRANSPORT);
+  const connectParams = TRANSPORT_CONFIG[transportType];
+
+  return (
     <PipecatAppBase
-      connectParams={{ webrtcUrl: "/api/offer" }}
+      connectParams={connectParams}
       initDevicesOnMount
-      transportType="smallwebrtc"
+      transportType={transportType}
       noThemeProvider
     >
       {({ client, handleConnect, handleDisconnect, error }: PipecatBaseChildProps) =>
@@ -34,5 +39,11 @@ createRoot(document.getElementById("root")!).render(
         )
       }
     </PipecatAppBase>
+  );
+}
+
+createRoot(document.getElementById("root")!).render(
+  <StrictMode>
+    <Main />
   </StrictMode>,
 );

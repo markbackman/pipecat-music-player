@@ -127,7 +127,7 @@ class MusicAgent(BaseAgent):
         stt = SonioxSTTService(
             api_key=os.getenv("SONIOX_API_KEY"),
             settings=SonioxSTTService.Settings(
-                language_hints=Language.EN,
+                language_hints=[Language.EN],
                 language_hints_strict=True,
             ),
         )
