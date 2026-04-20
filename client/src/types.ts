@@ -1,0 +1,196 @@
+export interface AlbumTrack {
+  id: string;
+  title: string;
+  duration_seconds: number;
+  preview_url?: string;
+}
+
+export interface Album {
+  id: string;
+  title: string;
+  year: number;
+  cover_url: string;
+  preview_url?: string;
+  tracks?: AlbumTrack[];
+  short_description?: string | null;
+  long_description?: string | null;
+}
+
+export interface Song {
+  id: string;
+  title: string;
+  album_id: string;
+  duration_seconds: number;
+  cover_url?: string;
+  preview_url?: string;
+  short_description?: string | null;
+  long_description?: string | null;
+}
+
+export interface MinimalArtist {
+  id: string;
+  name: string;
+  image_url: string;
+}
+
+export interface Artist {
+  id: string;
+  name: string;
+  genre: string;
+  image_url: string;
+  albums: Album[];
+  songs: Song[];
+  short_description?: string | null;
+  long_description?: string | null;
+  related_artists?: MinimalArtist[];
+}
+
+export interface Favorite {
+  artist_id: string;
+  artist_name: string;
+  kind: "album" | "song";
+  item_id: string;
+  item_title: string;
+  cover_url?: string | null;
+}
+
+export interface NewRelease {
+  id: string;
+  title: string;
+  year: number;
+  release_date: string;
+  cover_url: string;
+  artist_id: string;
+  artist_name: string;
+}
+
+export type ArtistTab = "albums" | "songs" | "related";
+
+export type Screen =
+  | {
+      kind: "home";
+      artists: MinimalArtist[];
+      new_releases: NewRelease[];
+      favorites: Favorite[];
+    }
+  | {
+      kind: "artist";
+      artist: Artist;
+      activeTab: ArtistTab;
+      backEnabled: boolean;
+    }
+  | {
+      kind: "detail";
+      detailKind: "album" | "song";
+      item: Album | Song;
+      artist: Artist;
+      isFavorite: boolean;
+      isPlaying: boolean;
+      playingTrackId: string | null;
+      backEnabled: boolean;
+    }
+  | {
+      kind: "trending";
+      label: string;
+      genre: string | null;
+      artists: MinimalArtist[];
+      backEnabled: boolean;
+    };
+
+export interface Toast {
+  title: string;
+  description: string;
+  subtitle?: string;
+  image_url?: string;
+}
+
+export type ServerMessage =
+  | {
+      type: "screen";
+      screen: "home";
+      artists: MinimalArtist[];
+      new_releases: NewRelease[];
+      favorites: Favorite[];
+    }
+  | {
+      type: "screen";
+      screen: "artist";
+      artist: Artist;
+      active_tab: ArtistTab;
+      back_enabled: boolean;
+    }
+  | {
+      type: "screen";
+      screen: "detail";
+      kind: "album" | "song";
+      item: Album | Song;
+      artist: Artist;
+      is_favorite: boolean;
+      is_playing: boolean;
+      playing_track_id?: string | null;
+      back_enabled: boolean;
+    }
+  | {
+      type: "screen";
+      screen: "trending";
+      label: string;
+      genre: string | null;
+      artists: MinimalArtist[];
+      back_enabled: boolean;
+    }
+  | {
+      type: "toast";
+      title: string;
+      description: string;
+      subtitle?: string;
+      image_url?: string;
+    }
+  | {
+      type: "playback";
+      state: "playing" | "stopped";
+      item_title: string;
+      item_id: string;
+      preview_url?: string;
+    }
+  | {
+      type: "playback_control";
+      action: "pause" | "resume" | "stop";
+    }
+  | {
+      type: "scroll_to";
+      target: string;
+    }
+  | {
+      type: "favorite_added";
+      favorite: Favorite;
+      favorites: Favorite[];
+    };
+
+export type ClickEvent =
+  | { kind: "nav"; view: "home" }
+  | { kind: "nav"; view: "back" }
+  | { kind: "nav"; view: "artist"; artist_id: string }
+  | {
+      kind: "nav";
+      view: "detail";
+      detail_kind: "album" | "song";
+      item_id: string;
+      artist_id: string;
+    }
+  | {
+      kind: "action";
+      action: "play" | "show_info" | "add_to_favorites";
+      item_id: string;
+      artist_id: string;
+    }
+  | {
+      kind: "set_tab";
+      artist_id: string;
+      tab: ArtistTab;
+    }
+  | {
+      kind: "play_track";
+      artist_id: string;
+      album_id: string;
+      track_id: string;
+    };

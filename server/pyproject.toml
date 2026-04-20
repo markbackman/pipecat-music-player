@@ -1,0 +1,15 @@
+[project]
+name = "music-player"
+version = "0.1.0"
+description = "Music player demo powered by Pipecat Subagents"
+requires-python = ">=3.11"
+dependencies = [
+    "pipecat-ai[webrtc,daily,silero,soniox,cartesia,openai,runner]>=1.0.0",
+    "pipecat-ai-subagents>=0.3.0",
+    "pipecatcloud>=0.5.0",
+]
+
+[tool.ruff]
+line-length = 100
+[tool.ruff.lint]
+select = ["I", "UP"]

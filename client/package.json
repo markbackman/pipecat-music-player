@@ -1,0 +1,26 @@
+{
+  "name": "music-player-client",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@pipecat-ai/client-js": "^1.7.0",
+    "@pipecat-ai/client-react": "^1.2.1",
+    "@pipecat-ai/small-webrtc-transport": "^1.10.0",
+    "@pipecat-ai/voice-ui-kit": "^0.8.2",
+    "react": "^19",
+    "react-dom": "^19"
+  },
+  "devDependencies": {
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@vitejs/plugin-react": "^6",
+    "typescript": "~6",
+    "vite": "^8"
+  }
+}

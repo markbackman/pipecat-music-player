@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.ruff_cache/
+
+# Secrets (lockfile + pyproject are bind-mounted for uv sync; anything
+# else that carries creds stays out of the image)
+.env
+.env.local
+
+# Docker
+Dockerfile
+.dockerignore
+
+# VCS
+.git/
+.gitignore
+
+# Editor
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
