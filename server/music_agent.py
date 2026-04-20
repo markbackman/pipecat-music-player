@@ -70,17 +70,6 @@ from voice_agent import VoiceAgent
 
 load_dotenv(override=True)
 
-transport_params = {
-    "daily": lambda: DailyParams(
-        audio_in_enabled=True,
-        audio_out_enabled=True,
-    ),
-    "webrtc": lambda: TransportParams(
-        audio_in_enabled=True,
-        audio_out_enabled=True,
-    ),
-}
-
 
 class MusicAgent(BaseAgent):
     """Root agent: owns the transport and bridges frames to the voice agent."""
@@ -138,7 +127,7 @@ class MusicAgent(BaseAgent):
         stt = SonioxSTTService(
             api_key=os.getenv("SONIOX_API_KEY"),
             settings=SonioxSTTService.Settings(
-                language_hint=Language.EN,
+                language_hints=Language.EN,
                 language_hints_strict=True,
             ),
         )
@@ -199,6 +188,28 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 
 
 async def bot(runner_args: RunnerArguments):
+    """Pipecat Cloud Client entry point."""
+
+    if os.environ.get("ENV") != "local":
+        from pipecat.audio.filters.krisp_viva_filter import KrispVivaFilter
+
+        krisp_filter = KrispVivaFilter()
+    else:
+        krisp_filter = None
+
+    transport_params = {
+        "daily": lambda: DailyParams(
+            audio_in_enabled=True,
+            audio_in_filter=krisp_filter,
+            audio_out_enabled=True,
+        ),
+        "webrtc": lambda: TransportParams(
+            audio_in_enabled=True,
+            audio_in_filter=krisp_filter,
+            audio_out_enabled=True,
+        ),
+    }
+
     transport = await create_transport(runner_args, transport_params)
     await run_bot(transport, runner_args)
 
