@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import type { PipecatBaseChildProps } from "@pipecat-ai/voice-ui-kit";
-import { UIAgentProvider } from "@pipecat-ai/client-react";
+import { UIAgentProvider, useA11ySnapshot } from "@pipecat-ai/client-react";
 import { useServerMessages } from "./hooks/useServerMessages";
 import { useClickSender } from "./hooks/useClickSender";
 import { Header } from "./components/Header";
@@ -27,7 +27,7 @@ function screenIdentity(s: Screen): string {
 
 export function App(props: PipecatBaseChildProps) {
   return (
-    <UIAgentProvider client={props.client}>
+    <UIAgentProvider client={props.client ?? undefined}>
       <AppInner {...props} />
     </UIAgentProvider>
   );
@@ -38,6 +38,11 @@ function AppInner({ handleConnect, handleDisconnect }: PipecatBaseChildProps) {
   const sendClick = useClickSender();
   const mainRef = useRef<HTMLElement>(null);
   const lastScreenId = useRef<string | null>(null);
+
+  // Spike: stream an accessibility snapshot of the app to the server
+  // so the UI agent has structural awareness of what's on screen
+  // without hand-written prose descriptions.
+  useA11ySnapshot();
 
   // Reset the scroll position to the top whenever we land on a
   // different page. Same-page data updates (e.g. the Related Artists
