@@ -89,7 +89,7 @@ _QA_PROMPTS = {
     "catalog": """You're answering a question about a music artist's catalog inside a voice-driven music player. Answer from the structured data below. Do not speculate beyond it.
 
 Artist: {artist_name}
-Albums (ordered by Deezer):
+{focus_section}Albums (ordered by Deezer):
 {album_list}
 Top songs (Deezer top tracks):
 {song_list}
@@ -100,7 +100,7 @@ Reply in one or two short spoken sentences (no markdown, lists, or symbols). If 
     "music": """You're a knowledgeable music concierge for a voice-driven music player. Answer conversationally, grounded by the artist's catalog below. Use your training knowledge for opinion or trivia questions, but only when you are confident.
 
 Artist: {artist_name}
-Albums (ordered by Deezer):
+{focus_section}Albums (ordered by Deezer):
 {album_list}
 Top songs (Deezer top tracks):
 {song_list}
@@ -118,14 +118,23 @@ async def answer_question(
     artist_name: str,
     albums: list[dict],
     songs: list[dict],
+    about: str | None = None,
+    about_tracks: list[dict] | None = None,
 ) -> str:
     """Generate a spoken answer to ``question`` grounded by the given catalog.
 
     ``mode`` is ``"catalog"`` for factual questions derivable from the
     structured data (latest, first, count, duration, release year) and
     ``"music"`` for trivia / opinion that should draw on training
-    knowledge. Returns an empty string if the model declines or the
-    call fails.
+    knowledge.
+
+    When ``about`` is set, the prompt includes a "Focus item" line so
+    the LLM can resolve deictic references like "this album" or "this
+    song" without guessing. Pass ``about_tracks`` when ``about``
+    names an album and you have its tracklist; the inner LLM uses it
+    to reason about "the best song on this album" and similar.
+
+    Returns an empty string if the model declines or the call fails.
     """
     template = _QA_PROMPTS.get(mode) or _QA_PROMPTS["catalog"]
 
@@ -136,8 +145,19 @@ async def answer_question(
     def fmt_song(s: dict) -> str:
         return f"- {s.get('title', '')}"
 
+    focus_lines: list[str] = []
+    if about:
+        focus_lines.append(f"Focus item (the user's 'this'/'that' refers to): {about}")
+        if about_tracks:
+            track_list = "\n".join(
+                f"  - {i + 1}. {t.get('title', '')}" for i, t in enumerate(about_tracks)
+            )
+            focus_lines.append(f"Tracklist for {about}:\n{track_list}")
+    focus_section = ("\n".join(focus_lines) + "\n\n") if focus_lines else ""
+
     prompt = template.format(
         artist_name=artist_name or "—",
+        focus_section=focus_section,
         album_list="\n".join(fmt_album(a) for a in albums) or "—",
         song_list="\n".join(fmt_song(s) for s in songs) or "—",
         question=question,
