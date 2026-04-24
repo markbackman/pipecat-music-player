@@ -32,7 +32,14 @@ from pipecat.processors.aggregators.llm_response_universal import LLMContextAggr
 from pipecat.services.llm_service import FunctionCallParams, LLMService
 from pipecat.services.openai.base_llm import OpenAILLMSettings
 from pipecat.services.openai.llm import OpenAILLMService
-from pipecat_subagents.agents import ScrollTo, TaskStatus, Toast, on_ui_event, tool
+from pipecat_subagents.agents import (
+    UI_STATE_PROMPT_GUIDE,
+    ScrollTo,
+    TaskStatus,
+    Toast,
+    on_ui_event,
+    tool,
+)
 from pipecat_subagents.agents import UIAgent as BaseUIAgent
 from pipecat_subagents.bus import AgentBus, BusTaskRequestMessage, BusUIEventMessage
 
@@ -42,7 +49,7 @@ Screen = Literal["home", "artist", "detail", "trending"]
 Kind = Literal["album", "song"]
 
 
-SYSTEM_PROMPT = """\
+_APP_PROMPT = """\
 You control a voice-driven music player backed by a live music catalog. \
 You never speak to the user directly. You always call exactly one tool \
 per turn.
@@ -137,25 +144,9 @@ conversational questions about the current artist (catalog facts, \
 opinions, trivia), use ``answer_about_catalog`` or \
 ``answer_about_music``.
 
-## UI context
-You receive two kinds of developer messages about the screen:
-- ``<ui_event name="..." >payload</ui_event>`` — an event the user \
-just triggered on the client (navigation click, action button, tab \
-switch, track selection). The payload is the JSON data for that \
-event.
-- ``<ui_state>...</ui_state>`` — an accessibility snapshot of the \
-current screen after a UI change completes. Indented tree in \
-Playwright-MCP style, where each line is ``- role "name" [state] \
-[ref=eN]`` with children nested one level deeper. State tags include \
-``[focused]``, ``[selected]``, ``[disabled]``, and ``[offscreen]``.
+"""
 
-Grids carry a ``[cols=N]`` tag. Their cells are listed in \
-reading order (left-to-right, top-to-bottom); with N columns, cell \
-K sits at row ``ceil(K/N)`` column ``((K-1) mod N) + 1``. Example \
-with ``[cols=8]`` and 16 children: "top right" is cell 8, \
-"bottom left" is cell 9. A node tagged ``[offscreen]`` exists on \
-the page but is not currently in the user's viewport; only visible \
-(non-offscreen) cells count for position-based references."""
+SYSTEM_PROMPT = f"{_APP_PROMPT}\n\n{UI_STATE_PROMPT_GUIDE}"
 
 
 @dataclass
@@ -198,10 +189,7 @@ class UIAgent(BaseUIAgent):
     """Owns UI state and routes voice requests / client clicks to UI actions."""
 
     def __init__(self, name: str, *, bus: AgentBus):
-        # log_snapshots=True for the spike: the server prints every
-        # incoming a11y snapshot (node count, char count, rendered
-        # form) via loguru.debug. Turn off once the feature is proven.
-        super().__init__(name, bus=bus, active=True, log_snapshots=True)
+        super().__init__(name, bus=bus, active=True)
         self._state = UIState()
         self._current_message: BusTaskRequestMessage | None = None
 
@@ -235,17 +223,13 @@ class UIAgent(BaseUIAgent):
         await self._emit_for_top()
 
     async def on_task_request(self, message: BusTaskRequestMessage) -> None:
+        # UIAgent's base handles <ui_state> auto-injection before we
+        # append the query, so the LLM always reasons over the current
+        # screen.
         await super().on_task_request(message)
         query = (message.payload or {}).get("query", "")
         logger.info(f"{self}: task query '{query}'")
         self._current_message = message
-        # Inject the latest <ui_state> just-in-time so the LLM reasons
-        # over the current screen, not whatever was stored when the
-        # previous screen emit ran. The client re-renders + re-snapshots
-        # asynchronously, so snapshots injected from ``_emit_*`` land
-        # one tick stale; by the time the user's next turn arrives the
-        # freshest snapshot is sitting in ``_latest_snapshot``.
-        await self.inject_ui_state()
         await self.queue_frame(
             LLMMessagesAppendFrame(
                 messages=[{"role": "developer", "content": query}],
@@ -763,7 +747,7 @@ class UIAgent(BaseUIAgent):
     async def _do_navigate_to_artist(self, artist: dict) -> str:
         self._enter(NavFrame(screen="artist", artist_id=artist["id"]))
         await self._emit_artist(artist)
-        return self._describe_artist_screen(artist)
+        return f"Showing {artist['name']}."
 
     async def _do_select_item(self, artist: dict, kind: Kind, item: dict) -> str:
         top = self._top()
@@ -773,7 +757,7 @@ class UIAgent(BaseUIAgent):
             NavFrame(screen="detail", artist_id=artist["id"], kind=kind, item_id=item["id"])
         )
         await self._emit_detail(artist, kind, item)
-        return self._describe_detail_screen(artist, kind, item)
+        return f"{item.get('title', 'Item')} by {artist['name']}."
 
     async def _do_play(self, artist: dict, kind: Kind, item: dict) -> str:
         top = self._top()
@@ -1093,7 +1077,6 @@ class UIAgent(BaseUIAgent):
                 "favorites": list(self._state.favorites),
             },
         )
-        await self._debug_snapshot("home")
 
     async def _emit_artist(self, artist: dict) -> None:
         tab = self._get_artist_tab(artist["id"])
@@ -1106,7 +1089,6 @@ class UIAgent(BaseUIAgent):
                 "back_enabled": len(self._state.stack) > 1,
             },
         )
-        await self._debug_snapshot("artist")
 
     def _get_artist_tab(self, artist_id: str) -> ArtistTab:
         return self._state.active_tab_by_artist.get(artist_id, "albums")
@@ -1163,7 +1145,6 @@ class UIAgent(BaseUIAgent):
                 "back_enabled": len(self._state.stack) > 1,
             },
         )
-        await self._debug_snapshot("detail")
 
     async def _emit_trending(self, label: str, artists: list[dict], genre: str | None) -> None:
         await self.send_command(
@@ -1176,7 +1157,6 @@ class UIAgent(BaseUIAgent):
                 "back_enabled": len(self._state.stack) > 1,
             },
         )
-        await self._debug_snapshot("trending")
 
     async def _emit_for_top(self) -> None:
         top = self._top()
@@ -1265,110 +1245,3 @@ class UIAgent(BaseUIAgent):
             response["speak"] = speak
         await self.send_task_response(task_id, response=response, status=status)
 
-    async def _debug_snapshot(self, label: str) -> None:
-        """Log the rendered <ui_state> so we can eyeball size and content.
-
-        Spike-only: helps validate the a11y-snapshot approach against
-        the hand-written prose. Remove once the spike concludes.
-        """
-        rendered = self.render_ui_state()
-        if not rendered:
-            logger.debug(f"ui: [{label}] no snapshot yet")
-            return
-        # Rough token estimate: 4 chars ~ 1 token for English prose.
-        char_count = len(rendered)
-        est_tokens = char_count // 4
-        logger.debug(
-            f"ui: [{label}] ui_state snapshot "
-            f"({char_count} chars, ~{est_tokens} tokens):\n{rendered}"
-        )
-
-    async def _inject_ui_update(self, description: str) -> None:
-        if not description:
-            return
-        await self.queue_frame(
-            LLMMessagesAppendFrame(
-                messages=[{"role": "developer", "content": f"<ui_state>{description}</ui_state>"}],
-                run_llm=False,
-            )
-        )
-
-    # ------------------------------------------------------------------
-    # Screen descriptions (grid layout + state) for the LLM context
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _describe_home_screen(
-        artists: list[dict], new_releases: list[dict], favorites: list[dict]
-    ) -> str:
-        sections = [UIAgent._describe_grid(artists, "Trending artists")]
-        release_items = [
-            {"title": f"{r.get('title', '')} — {r.get('artist_name', '')}"} for r in new_releases
-        ]
-        sections.append(UIAgent._describe_grid(release_items, "New releases"))
-        fav_items = [
-            {"title": f"{f.get('item_title', '')} — {f.get('artist_name', '')}"} for f in favorites
-        ]
-        if fav_items:
-            sections.append(UIAgent._describe_grid(fav_items, "Favorites"))
-        else:
-            sections.append("Favorites grid: empty.")
-        return "Home screen. " + " ".join(sections)
-
-    @staticmethod
-    def _describe_grid(items: list[dict], label: str, cols: int = 8) -> str:
-        # Items are albums/songs (keyed by ``title``) or minimal artist
-        # records (keyed by ``name``). Accept either.
-        parts = [
-            f"row {i // cols + 1} col {i % cols + 1}: "
-            + str(item.get("title") or item.get("name") or "")
-            for i, item in enumerate(items)
-        ]
-        rows = max(1, (len(items) - 1) // cols + 1) if items else 0
-        return f"{label} grid ({rows} rows x {cols} columns): " + "; ".join(parts)
-
-    def _describe_artist_screen(self, artist: dict) -> str:
-        tab = self._get_artist_tab(artist["id"])
-        if tab == "songs":
-            grid_desc = self._describe_grid(artist.get("songs") or [], "Songs")
-        elif tab == "related":
-            related = artist.get("related_artists") or []
-            grid_desc = (
-                self._describe_grid(related, "Related artists")
-                if related
-                else "Related artists grid: empty (fetching)."
-            )
-        else:
-            grid_desc = self._describe_grid(artist.get("albums") or [], "Albums")
-        return (
-            f"Artist screen: {artist['name']} ({tab} tab active). {grid_desc} "
-            f"Tabs available: Albums, Songs, Related artists."
-        )
-
-    @staticmethod
-    def _describe_trending_screen(label: str, artists: list[dict]) -> str:
-        return f"{label} screen. " + UIAgent._describe_grid(artists, "Trending", cols=8)
-
-    def _describe_detail_screen(self, artist: dict, kind: Kind, item: dict) -> str:
-        is_favorite = (
-            self._favorite_key(artist["id"], kind, item["id"]) in self._state.favorite_keys
-        )
-        is_playing = (
-            self._state.playing is not None
-            and self._state.playing_artist_id == artist["id"]
-            and self._state.playing.get("id") == item["id"]
-        )
-        flags = []
-        if is_playing:
-            flags.append("playing")
-        if is_favorite:
-            flags.append("favorited")
-        flags_text = f" ({', '.join(flags)})" if flags else ""
-        short = item.get("short_description") or ""
-        base = f"Detail screen: {kind} '{item['title']}' by {artist['name']}{flags_text}. {short}"
-        if kind == "album":
-            tracks = item.get("tracks") or []
-            if tracks:
-                parts = [f"{i + 1}. {t['title']}" for i, t in enumerate(tracks)]
-                base += " Tracklist: " + "; ".join(parts) + "."
-        return base
