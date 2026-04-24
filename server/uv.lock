@@ -1405,7 +1405,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "pipecat-ai", extras = ["webrtc", "daily", "silero", "soniox", "cartesia", "openai", "runner"], specifier = ">=1.0.0" },
-    { name = "pipecat-ai-subagents", specifier = ">=0.3.0" },
+    { name = "pipecat-ai-subagents", editable = "../../pipecat-subagents" },
     { name = "pipecatcloud", specifier = ">=0.5.0" },
 ]
 
@@ -1774,14 +1774,39 @@ wheels = [
 
 [[package]]
 name = "pipecat-ai-subagents"
-version = "0.3.0"
-source = { registry = "https://pypi.org/simple" }
+source = { editable = "../../pipecat-subagents" }
 dependencies = [
     { name = "pipecat-ai" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ca/6c/7f6d7cef67d19c494c81ce5b1ac58a01673f011a39202aa81debe90ef789/pipecat_ai_subagents-0.3.0.tar.gz", hash = "sha256:9d3896fd13f2f38b82560b6e0f40c9f2a0a0c8718b8594dc3f0e8c79cb708cca", size = 722995, upload-time = "2026-04-16T22:47:12.782Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/8a/11/760fa9a0b21ad890a918e9be42b65f970a1fd8817ef4f8532888e169b97f/pipecat_ai_subagents-0.3.0-py3-none-any.whl", hash = "sha256:bdf2e5eca9a6cdcdfdf8f80547be57424d85efa87a3b66e02e490387857aec8e", size = 66382, upload-time = "2026-04-16T22:47:11.405Z" },
+
+[package.metadata]
+requires-dist = [
+    { name = "claude-agent-sdk", marker = "extra == 'examples'", specifier = ">=0.1.0" },
+    { name = "fastapi", marker = "extra == 'websocket'", specifier = ">=0.115.6,<1" },
+    { name = "pipecat-ai", specifier = ">=1.0.0" },
+    { name = "pipecat-ai", extras = ["cartesia", "daily", "deepgram", "openai", "runner", "silero", "webrtc"], marker = "extra == 'examples'", specifier = ">=1.0.0" },
+    { name = "pipecat-ai-flows", marker = "extra == 'flows'", specifier = ">=1.0.0" },
+    { name = "pipecat-ai-subagents", extras = ["flows", "redis", "websocket"], marker = "extra == 'examples'" },
+    { name = "redis", extras = ["hiredis"], marker = "extra == 'redis'", specifier = ">=5.0.0" },
+    { name = "websockets", marker = "extra == 'websocket'", specifier = ">=13.1,<16.0" },
+]
+provides-extras = ["flows", "redis", "websocket", "examples"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "build", specifier = "~=1.2.2" },
+    { name = "pip-tools", specifier = "~=7.4.1" },
+    { name = "pre-commit", specifier = "~=4.2.0" },
+    { name = "pyright", specifier = "~=1.1.402" },
+    { name = "pytest", specifier = ">=9.0.0,<10" },
+    { name = "pytest-aiohttp", specifier = ">=1.0.0,<2" },
+    { name = "pytest-asyncio", specifier = ">=1.0.0,<2" },
+    { name = "pytest-cov", specifier = "~=4.1.0" },
+    { name = "python-dotenv", specifier = ">=1.0.1,<2.0.0" },
+    { name = "ruff", specifier = ">=0.12.11,<1" },
+    { name = "setuptools", specifier = "~=78.1.1" },
+    { name = "setuptools-scm", specifier = "~=8.3.1" },
+    { name = "towncrier", specifier = "~=25.8.0" },
 ]
 
 [[package]]

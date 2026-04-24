@@ -1,8 +1,22 @@
 import { useCallback, useRef, useState } from "react";
 import { RTVIEvent } from "@pipecat-ai/client-js";
 import { useRTVIClientEvent } from "@pipecat-ai/client-react";
+import {
+  useUICommandHandler,
+  type ToastPayload,
+} from "@pipecat-ai/client-react";
 import { usePreviewPlayer } from "./usePreviewPlayer";
-import type { Favorite, Screen, ServerMessage, Toast } from "../types";
+import type {
+  Album,
+  Artist,
+  ArtistTab,
+  Favorite,
+  MinimalArtist,
+  NewRelease,
+  Screen,
+  Song,
+  Toast,
+} from "../types";
 
 const TOAST_MAX_DURATION_MS = 20_000;
 
@@ -12,6 +26,61 @@ const INITIAL_SCREEN: Screen = {
   new_releases: [],
   favorites: [],
 };
+
+// Server→client command payloads specific to the music player. Payloads
+// for standard commands (toast, scroll_to) are imported from
+// @pipecat-ai/ui-agent-client-js.
+
+type ScreenPayload =
+  | {
+      screen: "home";
+      artists: MinimalArtist[];
+      new_releases: NewRelease[];
+      favorites: Favorite[];
+    }
+  | {
+      screen: "artist";
+      artist: Artist;
+      active_tab: ArtistTab;
+      back_enabled: boolean;
+    }
+  | {
+      screen: "detail";
+      kind: "album" | "song";
+      item: Album | Song;
+      artist: Artist;
+      is_favorite: boolean;
+      is_playing: boolean;
+      playing_track_id?: string | null;
+      back_enabled: boolean;
+    }
+  | {
+      screen: "trending";
+      label: string;
+      genre: string | null;
+      artists: MinimalArtist[];
+      back_enabled: boolean;
+    };
+
+interface PlaybackPayload {
+  state: "playing" | "stopped";
+  item_title: string;
+  item_id: string;
+  preview_url?: string;
+}
+
+interface PlaybackControlPayload {
+  action: "pause" | "resume" | "stop";
+}
+
+interface FavoriteAddedPayload {
+  favorite: Favorite;
+  favorites: Favorite[];
+}
+
+interface ScrollToPayload {
+  target_id: string;
+}
 
 export function useServerMessages() {
   const [screen, setScreen] = useState<Screen>(INITIAL_SCREEN);
@@ -57,9 +126,9 @@ export function useServerMessages() {
     }, TOAST_MAX_DURATION_MS);
   }, []);
 
-  useRTVIClientEvent(RTVIEvent.ServerMessage, (data: unknown) => {
-    const msg = data as ServerMessage;
-    if (msg.type === "screen") {
+  useUICommandHandler<ScreenPayload>(
+    "screen",
+    useCallback((msg) => {
       if (msg.screen === "home") {
         setScreen({
           kind: "home",
@@ -95,62 +164,97 @@ export function useServerMessages() {
           backEnabled: msg.back_enabled,
         });
       }
-    } else if (msg.type === "toast") {
-      showToast(
-        {
-          title: msg.title,
-          description: msg.description,
-          subtitle: msg.subtitle,
-          image_url: msg.image_url,
-        },
-        true,
-      );
-    } else if (msg.type === "playback") {
-      if (msg.state === "playing") {
-        setNowPlaying({ id: msg.item_id, title: msg.item_title });
-        if (msg.preview_url) {
-          player.play(msg.preview_url);
+    }, []),
+  );
+
+  useUICommandHandler<ToastPayload>(
+    "toast",
+    useCallback(
+      (payload) => {
+        showToast(
+          {
+            title: payload.title,
+            description: payload.description ?? "",
+            subtitle: payload.subtitle ?? undefined,
+            image_url: payload.image_url ?? undefined,
+          },
+          true,
+        );
+      },
+      [showToast],
+    ),
+  );
+
+  useUICommandHandler<PlaybackPayload>(
+    "playback",
+    useCallback(
+      (msg) => {
+        if (msg.state === "playing") {
+          setNowPlaying({ id: msg.item_id, title: msg.item_title });
+          if (msg.preview_url) {
+            player.play(msg.preview_url);
+          } else {
+            player.stop();
+          }
         } else {
+          setNowPlaying(null);
           player.stop();
         }
-      } else {
-        setNowPlaying(null);
-        player.stop();
-      }
-    } else if (msg.type === "playback_control") {
-      if (msg.action === "pause") player.pause();
-      else if (msg.action === "resume") player.resume();
-      else if (msg.action === "stop") {
-        player.stop();
-        setNowPlaying(null);
-      }
-    } else if (msg.type === "favorite_added") {
-      setFavorites(msg.favorites);
-      setScreen((prev) =>
-        prev.kind === "home"
-          ? { ...prev, favorites: msg.favorites }
-          : prev,
-      );
-      showToast(
-        {
-          title: "Added to favorites",
-          description: msg.favorite.item_title,
-          image_url: msg.favorite.cover_url ?? undefined,
-        },
-        false,
-      );
-    } else if (msg.type === "scroll_to") {
+      },
+      [player],
+    ),
+  );
+
+  useUICommandHandler<PlaybackControlPayload>(
+    "playback_control",
+    useCallback(
+      (msg) => {
+        if (msg.action === "pause") player.pause();
+        else if (msg.action === "resume") player.resume();
+        else if (msg.action === "stop") {
+          player.stop();
+          setNowPlaying(null);
+        }
+      },
+      [player],
+    ),
+  );
+
+  useUICommandHandler<FavoriteAddedPayload>(
+    "favorite_added",
+    useCallback(
+      (msg) => {
+        setFavorites(msg.favorites);
+        setScreen((prev) =>
+          prev.kind === "home" ? { ...prev, favorites: msg.favorites } : prev,
+        );
+        showToast(
+          {
+            title: "Added to favorites",
+            description: msg.favorite.item_title,
+            image_url: msg.favorite.cover_url ?? undefined,
+          },
+          false,
+        );
+      },
+      [showToast],
+    ),
+  );
+
+  useUICommandHandler<ScrollToPayload>(
+    "scroll_to",
+    useCallback((payload) => {
       // Defer so React has time to render the flagged section before we
       // try to scroll it into view.
-      const target = msg.target;
+      const target = payload.target_id;
       requestAnimationFrame(() => {
         const el = document.querySelector<HTMLElement>(
           `[data-scroll-target="${target}"]`,
         );
         el?.scrollIntoView({ behavior: "smooth", block: "start" });
       });
-    }
-  });
+    }, []),
+  );
 
   // When the bot finishes narrating, dismiss a bot-linked toast so the
   // card disappears alongside the voice, matching what the user just heard.
