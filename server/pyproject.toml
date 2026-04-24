@@ -9,6 +9,9 @@ dependencies = [
     "pipecatcloud>=0.5.0",
 ]
 
+[tool.uv.sources]
+pipecat-ai-subagents = { path = "../../pipecat-subagents", editable = true }
+
 [tool.ruff]
 line-length = 100
 [tool.ruff.lint]

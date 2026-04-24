@@ -58,13 +58,17 @@ from pipecat.services.soniox.stt import SonioxSTTService
 from pipecat.transcriptions.language import Language
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.daily.transport import DailyParams
-from pipecat_subagents.agents import BaseAgent, LLMAgentActivationArgs, agent_ready
+from pipecat_subagents.agents import (
+    BaseAgent,
+    LLMAgentActivationArgs,
+    agent_ready,
+    attach_ui_bridge,
+)
 from pipecat_subagents.bus import BusBridgeProcessor
 from pipecat_subagents.runner import AgentRunner
 from pipecat_subagents.types import AgentReadyData
 
 from catalog_agent import CatalogAgent
-from messages import BusUIContextMessage
 from ui_agent import UIAgent
 from voice_agent import VoiceAgent
 
@@ -80,20 +84,20 @@ class MusicAgent(BaseAgent):
 
     async def on_ready(self) -> None:
         await super().on_ready()
+        # Forward client `ui.event` RTVI messages onto the bus so the
+        # UI agent can dispatch them without the voice agent mediating.
+        attach_ui_bridge(self, target="ui")
 
-        # Forward UI click events from the RTVI client into the bus so
-        # the UI agent can react without the voice agent mediating.
-        @self.pipeline_task.rtvi.event_handler("on_client_message")
-        async def on_client_message(rtvi, msg):
-            if msg.type != "ui_context":
-                return
-            await self._bus.send(
-                BusUIContextMessage(
-                    source=self.name,
-                    target="ui",
-                    data=msg.data,
-                )
-            )
+        # Create voice + UI agents after the RTVI handshake completes so
+        # the client is already subscribed to server messages by the
+        # time UIAgent.on_activated emits the initial screen.
+        @self.pipeline_task.rtvi.event_handler("on_client_ready")
+        async def on_client_ready(rtvi):
+            logger.info("Client ready")
+            voice = VoiceAgent("voice", bus=self.bus)
+            ui = UIAgent("ui", bus=self.bus)
+            await self.add_agent(voice)
+            await self.add_agent(ui)
 
     @agent_ready(name="voice")
     async def on_voice_ready(self, data: AgentReadyData) -> None:
@@ -153,10 +157,6 @@ class MusicAgent(BaseAgent):
         @self._transport.event_handler("on_client_connected")
         async def on_client_connected(transport, client):
             logger.info("Client connected")
-            voice = VoiceAgent("voice", bus=self.bus)
-            ui = UIAgent("ui", bus=self.bus)
-            await self.add_agent(voice)
-            await self.add_agent(ui)
 
         @self._transport.event_handler("on_client_disconnected")
         async def on_client_disconnected(transport, client):
