@@ -602,9 +602,7 @@ class UIAgent(BaseUIAgent):
         await self._respond(description, speak=answer)
         await params.result_callback(None)
 
-    async def _resolve_about_tracks(
-        self, artist: dict, about: str
-    ) -> list[dict] | None:
+    async def _resolve_about_tracks(self, artist: dict, about: str) -> list[dict] | None:
         """Return the tracklist for ``about`` when it names an album.
 
         Looks in the current artist's album list first (the common
@@ -1274,4 +1272,3 @@ class UIAgent(BaseUIAgent):
         if speak:
             response["speak"] = speak
         await self.send_task_response(task_id, response=response, status=status)
-
