@@ -574,12 +574,15 @@ class UIAgent(BaseUIAgent):
             await params.result_callback(None)
             return
 
+        about_tracks = await self._resolve_about_tracks(artist, about) if about else None
         answer = await descriptions.answer_question(
             mode=mode,
             question=question,
             artist_name=artist["name"],
             albums=artist.get("albums") or [],
             songs=artist.get("songs") or [],
+            about=about,
+            about_tracks=about_tracks,
         )
         if not answer:
             fallback = "I'm not sure about that one."
@@ -598,6 +601,31 @@ class UIAgent(BaseUIAgent):
         )
         await self._respond(description, speak=answer)
         await params.result_callback(None)
+
+    async def _resolve_about_tracks(self, artist: dict, about: str) -> list[dict] | None:
+        """Return the tracklist for ``about`` when it names an album.
+
+        Looks in the current artist's album list first (the common
+        case, since the user is typically on a detail page). Fetches
+        from the catalog on demand if the album is known but its
+        tracks haven't been loaded yet. Returns ``None`` for songs,
+        artist names, or unresolved strings.
+        """
+        target = (about or "").strip().lower()
+        if not target:
+            return None
+        for alb in artist.get("albums") or []:
+            if (alb.get("title") or "").strip().lower() != target:
+                continue
+            tracks = alb.get("tracks")
+            if tracks:
+                return tracks
+            fetched = await self._catalog_get_album_tracks(alb.get("id", ""))
+            if fetched:
+                alb["tracks"] = fetched
+                return fetched
+            return None
+        return None
 
     def _current_context_artist(self) -> dict | None:
         """Best-effort: return the artist whose page the user is on."""
@@ -1244,4 +1272,3 @@ class UIAgent(BaseUIAgent):
         if speak:
             response["speak"] = speak
         await self.send_task_response(task_id, response=response, status=status)
-
