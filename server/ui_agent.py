@@ -34,7 +34,9 @@ from pipecat.services.openai.base_llm import OpenAILLMSettings
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat_subagents.agents import (
     UI_STATE_PROMPT_GUIDE,
+    HighlightToolMixin,
     ScrollTo,
+    ScrollToToolMixin,
     TaskStatus,
     Toast,
     on_ui_event,
@@ -119,6 +121,15 @@ anything chart-adjacent.
 - ``go_home()``: Reset to the home grid.
 - ``describe_screen(text)``: Describe the current screen in a single \
 short sentence. Read-only.
+- ``scroll_to(ref)``: Scroll an element into view by its \
+``<ui_state>`` ref. Use when the user wants to act on an element \
+tagged ``[offscreen]`` (e.g. "play the last song" when track 18 is \
+below the fold). Pair with the follow-up action on the next turn \
+once the snapshot refreshes.
+- ``highlight(ref)``: Briefly flash an element by its ref. Use when \
+the user asks you to point at, identify, or call attention to a \
+visible element ("which one is Radiohead?", "show me OK Computer"). \
+Purely visual; no navigation side effect.
 
 ## Decision rules
 1. Every turn picks exactly one tool. Never reply with plain text.
@@ -185,12 +196,13 @@ class UIState:
     active_tab_by_artist: dict[str, ArtistTab] = field(default_factory=dict)
 
 
-class UIAgent(BaseUIAgent):
+class UIAgent(ScrollToToolMixin, HighlightToolMixin, BaseUIAgent):
     """Owns UI state and routes voice requests / client clicks to UI actions."""
 
     def __init__(self, name: str, *, bus: AgentBus):
         super().__init__(name, bus=bus, active=True)
         self._state = UIState()
+        self._seed_demo_favorites()
         self._current_message: BusTaskRequestMessage | None = None
 
     def build_llm(self) -> LLMService:
@@ -956,6 +968,39 @@ class UIAgent(BaseUIAgent):
             "item_title": item["title"],
             "cover_url": item.get("cover_url"),
         }
+
+    def _seed_demo_favorites(self) -> None:
+        """Seed the Favorites grid with a couple of well-known items.
+
+        Demo only. Lets "scroll to my favorites" and "point at X" land
+        on something concrete instead of the empty-state placeholder.
+        Navigation into seeded items may not resolve if Deezer's IDs
+        drift; that's acceptable for a review demo.
+        """
+        seeds: list[dict] = [
+            {
+                "artist_id": "399",
+                "artist_name": "Radiohead",
+                "kind": "album",
+                "item_id": "7521880",
+                "item_title": "In Rainbows",
+                "cover_url": None,
+            },
+            {
+                "artist_id": "1194053",
+                "artist_name": "Bad Bunny",
+                "kind": "album",
+                "item_id": "656407741",
+                "item_title": "DeBÍ TiRAR MáS FOToS",
+                "cover_url": None,
+            },
+        ]
+        for fav in seeds:
+            key = self._favorite_key(fav["artist_id"], fav["kind"], fav["item_id"])
+            if key in self._state.favorite_keys:
+                continue
+            self._state.favorite_keys.add(key)
+            self._state.favorites.append(fav)
 
     # ------------------------------------------------------------------
     # CatalogAgent task calls

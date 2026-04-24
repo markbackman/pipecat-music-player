@@ -576,3 +576,51 @@ body,
   cursor: pointer;
   padding: 4px 8px;
 }
+
+/*
+ * Applied by the standard highlight handler when the voice agent
+ * calls ``highlight(ref)``. The ring pulses twice over the default
+ * 2-second window so it's unmistakable on a shared screen.
+ */
+.ui-highlight {
+  position: relative;
+  animation: ui-highlight-pulse 1s ease-in-out 2;
+}
+
+.ui-highlight::after {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border-radius: 12px;
+  border: 3px solid #ffd24a;
+  pointer-events: none;
+  box-shadow:
+    0 0 0 2px rgba(255, 210, 74, 0.25),
+    0 0 16px 4px rgba(255, 210, 74, 0.55);
+  animation: ui-highlight-fade 2s ease-in-out forwards;
+}
+
+@keyframes ui-highlight-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.03);
+  }
+}
+
+@keyframes ui-highlight-fade {
+  0% {
+    opacity: 0;
+  }
+  15% {
+    opacity: 1;
+  }
+  85% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}

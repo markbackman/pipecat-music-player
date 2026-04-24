@@ -2,6 +2,8 @@ import { useCallback, useRef, useState } from "react";
 import { RTVIEvent } from "@pipecat-ai/client-js";
 import { useRTVIClientEvent } from "@pipecat-ai/client-react";
 import {
+  useStandardHighlightHandler,
+  useStandardScrollToHandler,
   useUICommandHandler,
   type ToastPayload,
 } from "@pipecat-ai/client-react";
@@ -76,10 +78,6 @@ interface PlaybackControlPayload {
 interface FavoriteAddedPayload {
   favorite: Favorite;
   favorites: Favorite[];
-}
-
-interface ScrollToPayload {
-  target_id: string;
 }
 
 export function useServerMessages() {
@@ -241,20 +239,26 @@ export function useServerMessages() {
     ),
   );
 
-  useUICommandHandler<ScrollToPayload>(
-    "scroll_to",
-    useCallback((payload) => {
-      // Defer so React has time to render the flagged section before we
-      // try to scroll it into view.
-      const target = payload.target_id;
-      requestAnimationFrame(() => {
-        const el = document.querySelector<HTMLElement>(
-          `[data-scroll-target="${target}"]`,
-        );
-        el?.scrollIntoView({ behavior: "smooth", block: "start" });
-      });
-    }, []),
-  );
+  // Standard handler resolves snapshot ``ref`` (from the LLM's
+  // ``scroll_to`` tool) first, then falls back to ``target_id`` (our
+  // section anchors). Scrolling happens inside the ``.main`` overflow
+  // container, and targets center-aligned so the element clears the
+  // sticky header.
+  useStandardScrollToHandler({
+    block: "center",
+    defaultBehavior: "smooth",
+    container: () => document.querySelector(".main"),
+  });
+
+  // Visual highlight driven by the LLM's ``highlight`` tool. Flash a
+  // styled ring around the target for 2 seconds; auto-scroll into
+  // view first so the highlight is actually seen even if the target
+  // is offscreen when requested.
+  useStandardHighlightHandler({
+    className: "ui-highlight",
+    defaultDurationMs: 2000,
+    scrollIntoViewFirst: true,
+  });
 
   // When the bot finishes narrating, dismiss a bot-linked toast so the
   // card disappears alongside the voice, matching what the user just heard.
