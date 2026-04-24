@@ -143,15 +143,19 @@ You receive two kinds of developer messages about the screen:
 just triggered on the client (navigation click, action button, tab \
 switch, track selection). The payload is the JSON data for that \
 event.
-- ``<ui_state>...</ui_state>`` — a description of the current screen \
-after a UI change completes, including grid layouts. Grid \
-descriptions use the form "row R col C: <title>". Resolve position \
-references against the columns reported in the most recent \
-``<ui_state>`` grid, for example:
-- "top left" is row 1 col 1.
-- "top right" is row 1 col N, where N is the last column.
-- "bottom left" is row 2 col 1.
-- "bottom right" is row 2 col N."""
+- ``<ui_state>...</ui_state>`` — an accessibility snapshot of the \
+current screen after a UI change completes. Indented tree in \
+Playwright-MCP style, where each line is ``- role "name" [state] \
+[ref=eN]`` with children nested one level deeper. State tags include \
+``[focused]``, ``[selected]``, ``[disabled]``, and ``[offscreen]``.
+
+Grids carry a ``[cols=N]`` tag. Their cells are listed in \
+reading order (left-to-right, top-to-bottom); with N columns, cell \
+K sits at row ``ceil(K/N)`` column ``((K-1) mod N) + 1``. Example \
+with ``[cols=8]`` and 16 children: "top right" is cell 8, \
+"bottom left" is cell 9. A node tagged ``[offscreen]`` exists on \
+the page but is not currently in the user's viewport; only visible \
+(non-offscreen) cells count for position-based references."""
 
 
 @dataclass
@@ -194,7 +198,10 @@ class UIAgent(BaseUIAgent):
     """Owns UI state and routes voice requests / client clicks to UI actions."""
 
     def __init__(self, name: str, *, bus: AgentBus):
-        super().__init__(name, bus=bus, active=True)
+        # log_snapshots=True for the spike: the server prints every
+        # incoming a11y snapshot (node count, char count, rendered
+        # form) via loguru.debug. Turn off once the feature is proven.
+        super().__init__(name, bus=bus, active=True, log_snapshots=True)
         self._state = UIState()
         self._current_message: BusTaskRequestMessage | None = None
 
@@ -232,6 +239,13 @@ class UIAgent(BaseUIAgent):
         query = (message.payload or {}).get("query", "")
         logger.info(f"{self}: task query '{query}'")
         self._current_message = message
+        # Inject the latest <ui_state> just-in-time so the LLM reasons
+        # over the current screen, not whatever was stored when the
+        # previous screen emit ran. The client re-renders + re-snapshots
+        # asynchronously, so snapshots injected from ``_emit_*`` land
+        # one tick stale; by the time the user's next turn arrives the
+        # freshest snapshot is sitting in ``_latest_snapshot``.
+        await self.inject_ui_state()
         await self.queue_frame(
             LLMMessagesAppendFrame(
                 messages=[{"role": "developer", "content": query}],
@@ -1079,9 +1093,7 @@ class UIAgent(BaseUIAgent):
                 "favorites": list(self._state.favorites),
             },
         )
-        await self._inject_ui_update(
-            self._describe_home_screen(artists, new_releases, self._state.favorites)
-        )
+        await self._debug_snapshot("home")
 
     async def _emit_artist(self, artist: dict) -> None:
         tab = self._get_artist_tab(artist["id"])
@@ -1094,7 +1106,7 @@ class UIAgent(BaseUIAgent):
                 "back_enabled": len(self._state.stack) > 1,
             },
         )
-        await self._inject_ui_update(self._describe_artist_screen(artist))
+        await self._debug_snapshot("artist")
 
     def _get_artist_tab(self, artist_id: str) -> ArtistTab:
         return self._state.active_tab_by_artist.get(artist_id, "albums")
@@ -1151,7 +1163,7 @@ class UIAgent(BaseUIAgent):
                 "back_enabled": len(self._state.stack) > 1,
             },
         )
-        await self._inject_ui_update(self._describe_detail_screen(artist, kind, item))
+        await self._debug_snapshot("detail")
 
     async def _emit_trending(self, label: str, artists: list[dict], genre: str | None) -> None:
         await self.send_command(
@@ -1164,7 +1176,7 @@ class UIAgent(BaseUIAgent):
                 "back_enabled": len(self._state.stack) > 1,
             },
         )
-        await self._inject_ui_update(self._describe_trending_screen(label, artists))
+        await self._debug_snapshot("trending")
 
     async def _emit_for_top(self) -> None:
         top = self._top()
@@ -1244,7 +1256,6 @@ class UIAgent(BaseUIAgent):
         speak: str | None = None,
         status: TaskStatus = TaskStatus.COMPLETED,
     ) -> None:
-        await self._inject_ui_update(description)
         if self._current_message is None:
             return
         task_id = self._current_message.task_id
@@ -1253,6 +1264,24 @@ class UIAgent(BaseUIAgent):
         if speak:
             response["speak"] = speak
         await self.send_task_response(task_id, response=response, status=status)
+
+    async def _debug_snapshot(self, label: str) -> None:
+        """Log the rendered <ui_state> so we can eyeball size and content.
+
+        Spike-only: helps validate the a11y-snapshot approach against
+        the hand-written prose. Remove once the spike concludes.
+        """
+        rendered = self.render_ui_state()
+        if not rendered:
+            logger.debug(f"ui: [{label}] no snapshot yet")
+            return
+        # Rough token estimate: 4 chars ~ 1 token for English prose.
+        char_count = len(rendered)
+        est_tokens = char_count // 4
+        logger.debug(
+            f"ui: [{label}] ui_state snapshot "
+            f"({char_count} chars, ~{est_tokens} tokens):\n{rendered}"
+        )
 
     async def _inject_ui_update(self, description: str) -> None:
         if not description:
