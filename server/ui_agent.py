@@ -3,18 +3,20 @@
 Two entry points:
 
 - ``on_task_request``: the voice agent delegates a natural-language
-  request. The UI agent's LLM picks one tool based on the [UI update]
-  context it maintains internally.
-- ``on_bus_message``: the client sends a ``ui_context`` event (grid
-  click or Detail-screen button). Dispatched directly to helper methods
-  without an LLM call; a ``[UI update]`` developer message is then
-  appended so the LLM sees the new state on the next voice turn.
+  request. The UI agent's LLM picks one tool based on the ``<ui_event>``
+  context injected by ``UIAgent`` on every client click.
+- ``@on_ui_event(...)``: the client sends a ``ui.event`` (grid click or
+  Detail-screen button). Dispatched directly to the decorated handler
+  without an LLM call; ``UIAgent`` auto-appends a ``<ui_event>``
+  developer message so the LLM sees the user action on the next turn.
 
-All UI changes fan out through ``_send_frame``, which wraps an
-``RTVIServerMessageFrame`` addressed to the root agent so the bridge
-forwards it to the transport. Every catalog lookup (seed listing,
-artist fetch, title resolution, description generation) goes through
-the long-lived ``CatalogAgent`` via the bus.
+All UI changes fan out through ``self.send_command(name, payload)``,
+which publishes a ``BusUICommandMessage``. The bridge installed by
+``attach_ui_bridge`` turns that into an ``RTVIServerMessageFrame`` on
+the root agent's pipeline so RTVI delivers it to the client. Every
+catalog lookup (seed listing, artist fetch, title resolution,
+description generation) goes through the long-lived ``CatalogAgent``
+via the bus.
 """
 
 import asyncio
@@ -27,23 +29,27 @@ from pipecat.frames.frames import LLMMessagesAppendFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
-from pipecat.processors.frame_processor import FrameDirection
-from pipecat.processors.frameworks.rtvi.frames import RTVIServerMessageFrame
 from pipecat.services.llm_service import FunctionCallParams, LLMService
 from pipecat.services.openai.base_llm import OpenAILLMSettings
 from pipecat.services.openai.llm import OpenAILLMService
-from pipecat_subagents.agents import LLMAgent, TaskStatus, tool
-from pipecat_subagents.bus import AgentBus, BusFrameMessage, BusTaskRequestMessage
-from pipecat_subagents.bus.messages import BusMessage
-
-import descriptions
-from messages import BusUIContextMessage
+from pipecat_subagents.agents import (
+    UI_STATE_PROMPT_GUIDE,
+    HighlightToolMixin,
+    ScrollTo,
+    ScrollToToolMixin,
+    TaskStatus,
+    Toast,
+    on_ui_event,
+    tool,
+)
+from pipecat_subagents.agents import UIAgent as BaseUIAgent
+from pipecat_subagents.bus import AgentBus, BusTaskRequestMessage, BusUIEventMessage
 
 Screen = Literal["home", "artist", "detail", "trending"]
 Kind = Literal["album", "song"]
 
 
-SYSTEM_PROMPT = """\
+_APP_PROMPT = """\
 You control a voice-driven music player backed by a live music catalog. \
 You never speak to the user directly. You always call exactly one tool \
 per turn.
@@ -55,7 +61,7 @@ Favorites. Position references on Home resolve against the section \
 the user names ("the first new release", "bottom left favorite").
 - **Artist**: an artist page with three tabs — Albums, Songs, and \
 Related artists. Only one tab's grid is visible at a time (8 columns \
-wide). The ``[UI update]`` context describes the currently active \
+wide). The ``<ui_state>`` context describes the currently active \
 tab; position references like "top right" resolve against that \
 tab's grid.
 - **Detail**: an album or song page with Play, More Info, and Add to \
@@ -82,17 +88,16 @@ screen; navigates to its detail page and starts playback.
 ``title`` may name an album, a song, or an artist; the server resolves \
 all three. Works from any screen. Use when the user asks "tell me \
 about X" and X is a specific album/song/artist they named.
-- ``answer_about_catalog(question, about=None)``: Answer a factual \
-question about the artist in focus using their catalog (latest album, \
-first album, release year, track count, duration). Speaks a short \
-answer. Pass ``about`` with the item title only if the answer pivots \
-on one specific album or song the user should see a toast for.
-- ``answer_about_music(question, about=None)``: Answer an opinion or \
-trivia question about the current artist (most popular album, best \
-entry point, who influenced them, are they still active). Uses the \
-model's general music knowledge, grounded by the catalog. Speaks a \
-short answer. Pass ``about`` only when the answer centers on a \
-specific album or song.
+- ``answer(text, about=None)``: Answer a question about the current \
+artist or screen. Write the spoken reply in ``text`` directly — \
+one or two short sentences, no markdown or lists. Ground factual \
+claims in what you see in ``<ui_state>`` (album titles, release \
+years on tiles, track titles, durations, track counts). Use your \
+general music knowledge for trivia: awards, Grammys, chart \
+performance, influences, biography, critical reception, \
+collaborations, cultural context. Pass ``about`` only when the \
+answer centers on a specific album or song the user should see a \
+toast for.
 - ``add_to_favorites(item_title)``: Mark an album or song as a \
 favorite. Works from any screen.
 - ``show_albums()``: Switch the current Artist page to its Albums \
@@ -113,12 +118,21 @@ anything chart-adjacent.
 - ``go_home()``: Reset to the home grid.
 - ``describe_screen(text)``: Describe the current screen in a single \
 short sentence. Read-only.
+- ``scroll_to(ref)``: Scroll an element into view by its \
+``<ui_state>`` ref. Use when the user wants to act on an element \
+tagged ``[offscreen]`` (e.g. "play the last song" when track 18 is \
+below the fold). Pair with the follow-up action on the next turn \
+once the snapshot refreshes.
+- ``highlight(ref)``: Briefly flash an element by its ref. Use when \
+the user asks you to point at, identify, or call attention to a \
+visible element ("which one is Radiohead?", "show me OK Computer"). \
+Purely visual; no navigation side effect.
 
 ## Decision rules
 1. Every turn picks exactly one tool. Never reply with plain text.
 2. If the user refers to an item by position ("top right", "the first \
 one", "second album"), resolve the position from the most recent \
-``[UI update]`` grid layout in your context, then pass the resolved \
+``<ui_state>`` grid layout in your context, then pass the resolved \
 title to the tool.
 3. If the user names a specific artist, album, or song, pass that \
 name verbatim to the tool; the server resolves it case-insensitively \
@@ -131,22 +145,17 @@ artist without a specific title.
 to switch the Artist page tab when the user asks for one of those \
 categories in the abstract ("show me the albums", "who's similar"). \
 Use ``show_trending`` for popularity / chart questions.
-6. Use ``describe_screen`` only for questions about the screen as a \
-whole ("where am I", "what is this page"). For questions about a \
-specific named item, use ``show_info`` or ``select_item``. For \
-conversational questions about the current artist (catalog facts, \
-opinions, trivia), use ``answer_about_catalog`` or \
-``answer_about_music``.
+6. Use ``describe_screen`` only for meta questions about the \
+current screen ("where am I", "what is this page"). Use \
+``show_info`` for "tell me about X" on a specific named item. Use \
+``answer`` for conversational questions about the current artist \
+(catalog facts, opinions, trivia, awards) — write the spoken reply \
+in ``text`` directly. Ground visible facts in ``<ui_state>``; use \
+training knowledge for trivia.
 
-## UI context
-You see ``[UI update]`` developer messages describing the current \
-screen and grid layouts. Grid descriptions use the form \
-"row R col C: <title>". Resolve position references against the \
-columns reported in the most recent grid description, for example:
-- "top left" is row 1 col 1.
-- "top right" is row 1 col N, where N is the last column.
-- "bottom left" is row 2 col 1.
-- "bottom right" is row 2 col N."""
+"""
+
+SYSTEM_PROMPT = f"{_APP_PROMPT}\n\n{UI_STATE_PROMPT_GUIDE}"
 
 
 @dataclass
@@ -185,13 +194,13 @@ class UIState:
     active_tab_by_artist: dict[str, ArtistTab] = field(default_factory=dict)
 
 
-class UIAgent(LLMAgent):
+class UIAgent(ScrollToToolMixin, HighlightToolMixin, BaseUIAgent):
     """Owns UI state and routes voice requests / client clicks to UI actions."""
 
     def __init__(self, name: str, *, bus: AgentBus):
         super().__init__(name, bus=bus, active=True)
         self._state = UIState()
-        self._current_message: BusTaskRequestMessage | None = None
+        self._seed_demo_favorites()
 
     def build_llm(self) -> LLMService:
         return OpenAILLMService(
@@ -215,17 +224,20 @@ class UIAgent(LLMAgent):
         )
 
     async def on_activated(self, args: dict | None) -> None:
-        # The client emits a ``{"kind": "hello"}`` ui_context message
-        # after the RTVI handshake completes. We emit the initial home
-        # screen there, not here, so the frame isn't raced against the
-        # client subscribing.
+        # The root agent creates this UIAgent inside RTVI's
+        # ``on_client_ready`` handler, so by the time ``on_activated``
+        # fires the client is already subscribed to server messages and
+        # we can emit the initial screen without a client round-trip.
         await super().on_activated(args)
+        await self._emit_for_top()
 
     async def on_task_request(self, message: BusTaskRequestMessage) -> None:
+        # UIAgent's base records the in-flight task on ``current_task``
+        # and auto-injects ``<ui_state>`` before we append the query,
+        # so the LLM always reasons over the current screen.
         await super().on_task_request(message)
         query = (message.payload or {}).get("query", "")
         logger.info(f"{self}: task query '{query}'")
-        self._current_message = message
         await self.queue_frame(
             LLMMessagesAppendFrame(
                 messages=[{"role": "developer", "content": query}],
@@ -233,18 +245,25 @@ class UIAgent(LLMAgent):
             )
         )
 
-    async def on_bus_message(self, message: BusMessage) -> None:
-        await super().on_bus_message(message)
-        if isinstance(message, BusUIContextMessage):
-            # Click handling may need to task-call CatalogAgent, and the
-            # catalog response comes back on this subscriber's own data
-            # queue. Awaiting the full flow inline would hold the queue
-            # open and deadlock the response. Spawn a task so the
-            # dispatcher returns immediately.
-            self.create_asyncio_task(
-                self._handle_client_event(message.data or {}),
-                "ui_client_event",
-            )
+    # ------------------------------------------------------------------
+    # Client UI events
+    # ------------------------------------------------------------------
+
+    @on_ui_event("nav")
+    async def _on_nav(self, message: BusUIEventMessage) -> None:
+        await self._handle_nav_click(message.payload or {})
+
+    @on_ui_event("action")
+    async def _on_action(self, message: BusUIEventMessage) -> None:
+        await self._handle_action_click(message.payload or {})
+
+    @on_ui_event("set_tab")
+    async def _on_set_tab(self, message: BusUIEventMessage) -> None:
+        await self._handle_set_tab_click(message.payload or {})
+
+    @on_ui_event("play_track")
+    async def _on_play_track(self, message: BusUIEventMessage) -> None:
+        await self._handle_play_track_click(message.payload or {})
 
     # ------------------------------------------------------------------
     # Tools
@@ -260,11 +279,12 @@ class UIAgent(LLMAgent):
         logger.info(f"{self}: navigate_to_artist('{artist_name}')")
         artist = await self._catalog_find_artist(artist_name)
         if not artist:
-            await self._respond(f"I could not find {artist_name} in the library.")
+            msg = f"I could not find {artist_name} in the library."
+            await self._respond(msg, speak=msg)
             await params.result_callback(None)
             return
         description = await self._do_navigate_to_artist(artist)
-        await self._respond(description)
+        await self._respond(description, speak=description)
         await params.result_callback(None)
 
     @tool
@@ -277,14 +297,15 @@ class UIAgent(LLMAgent):
         logger.info(f"{self}: select_item('{item_title}')")
         resolved = await self._catalog_resolve_item(item_title)
         if not resolved:
-            await self._respond(f"I could not find {item_title} in the library.")
+            msg = f"I could not find {item_title} in the library."
+            await self._respond(msg, speak=msg)
             await params.result_callback(None)
             return
         artist = resolved["artist"]
         kind: Kind = resolved["kind"]
         item = resolved["item"]
         description = await self._do_select_item(artist, kind, item)
-        await self._respond(description)
+        await self._respond(description, speak=description)
         await params.result_callback(None)
 
     @tool
@@ -297,7 +318,8 @@ class UIAgent(LLMAgent):
         logger.info(f"{self}: play('{item_title}')")
         resolved = await self._catalog_resolve_item(item_title)
         if not resolved:
-            await self._respond(f"I could not find {item_title} in the library.")
+            msg = f"I could not find {item_title} in the library."
+            await self._respond(msg, speak=msg)
             await params.result_callback(None)
             return
         artist = resolved["artist"]
@@ -348,7 +370,8 @@ class UIAgent(LLMAgent):
 
         resolved = await self._catalog_resolve_item(title)
         if not resolved:
-            await self._respond(f"I could not find {title} in the library.")
+            msg = f"I could not find {title} in the library."
+            await self._respond(msg, speak=msg)
             await params.result_callback(None)
             return
         artist = resolved["artist"]
@@ -372,14 +395,15 @@ class UIAgent(LLMAgent):
         logger.info(f"{self}: add_to_favorites('{item_title}')")
         resolved = await self._catalog_resolve_item(item_title)
         if not resolved:
-            await self._respond(f"I could not find {item_title} in the library.")
+            msg = f"I could not find {item_title} in the library."
+            await self._respond(msg, speak=msg)
             await params.result_callback(None)
             return
         artist = resolved["artist"]
         kind: Kind = resolved["kind"]
         item = resolved["item"]
         description = await self._do_add_favorite(artist, kind, item)
-        await self._respond(description)
+        await self._respond(description, speak="Added.")
         await params.result_callback(None)
 
     @tool
@@ -392,7 +416,8 @@ class UIAgent(LLMAgent):
         logger.info(f"{self}: control_playback('{action}')")
         normalized = action.strip().lower()
         if normalized not in ("pause", "resume", "stop"):
-            await self._respond(f"Unknown playback action: {action}.")
+            msg = f"Unknown playback action: {action}."
+            await self._respond(msg, speak=msg)
             await params.result_callback(None)
             return
         if self._state.playing is None:
@@ -400,7 +425,7 @@ class UIAgent(LLMAgent):
             await params.result_callback(None)
             return
         title = self._state.playing["title"]
-        await self._send_frame({"type": "playback_control", "action": normalized})
+        await self.send_command("playback_control", {"action": normalized})
         if normalized == "stop":
             await self._do_stop_playback()
             await self._respond(f"Stopped {title}.", speak="Stopped.")
@@ -416,7 +441,8 @@ class UIAgent(LLMAgent):
         logger.info(f"{self}: show_similar_artists")
         artist = await self._current_artist_for_tab_switch()
         if artist is None:
-            await self._respond("I can only show similar artists while you're on an artist page.")
+            msg = "I can only show similar artists while you're on an artist page."
+            await self._respond(msg, speak=msg)
             await params.result_callback(None)
             return
         await self._activate_tab(artist, "related")
@@ -439,7 +465,8 @@ class UIAgent(LLMAgent):
         logger.info(f"{self}: show_albums")
         artist = await self._current_artist_for_tab_switch()
         if artist is None:
-            await self._respond("I can only switch tabs while you're on an artist page.")
+            msg = "I can only switch tabs while you're on an artist page."
+            await self._respond(msg, speak=msg)
             await params.result_callback(None)
             return
         await self._activate_tab(artist, "albums")
@@ -455,7 +482,8 @@ class UIAgent(LLMAgent):
         logger.info(f"{self}: show_songs")
         artist = await self._current_artist_for_tab_switch()
         if artist is None:
-            await self._respond("I can only switch tabs while you're on an artist page.")
+            msg = "I can only switch tabs while you're on an artist page."
+            await self._respond(msg, speak=msg)
             await params.result_callback(None)
             return
         await self._activate_tab(artist, "songs")
@@ -466,38 +494,41 @@ class UIAgent(LLMAgent):
         await params.result_callback(None)
 
     @tool
-    async def answer_about_catalog(
+    async def answer(
         self,
         params: FunctionCallParams,
-        question: str,
+        text: str,
         about: str | None = None,
     ):
-        """Answer a factual question about the current artist's catalog.
+        """Answer a question about the current artist or screen.
+
+        Ground factual claims in what you see in ``<ui_state>``
+        (album titles, release years on tiles, track titles,
+        durations, track counts). For trivia — awards, Grammys,
+        chart performance, influences, biography, critical
+        reception, collaborations, cultural context — use your
+        general music knowledge. Keep the reply to one or two
+        short spoken sentences.
 
         Args:
-            question: The user's question, passed verbatim.
-            about: Optional album, song, or artist title the answer \
-                pivots on. When provided, the server raises a toast \
-                for that item alongside the spoken answer.
+            text: The spoken answer in plain language (TTS-ready).
+            about: Optional album, song, or artist title the answer
+                pivots on. When the title resolves to a catalog
+                item, the server raises a toast for it alongside
+                the spoken answer.
         """
-        await self._answer_question("catalog", question, about, params)
-
-    @tool
-    async def answer_about_music(
-        self,
-        params: FunctionCallParams,
-        question: str,
-        about: str | None = None,
-    ):
-        """Answer an opinion or trivia question about the current artist.
-
-        Args:
-            question: The user's question, passed verbatim.
-            about: Optional album, song, or artist title the answer \
-                pivots on. When provided, the server raises a toast \
-                for that item alongside the spoken answer.
-        """
-        await self._answer_question("music", question, about, params)
+        logger.info(f"{self}: answer('{text[:60]}...', about={about!r})")
+        artist = self._current_context_artist()
+        toast_emitted = False
+        if artist is not None and about:
+            toast_emitted = await self._emit_answer_toast(artist, about, text)
+        description = (
+            f"Answer on {artist['name']}: {text}"
+            if artist and toast_emitted
+            else f"Answer: {text}"
+        )
+        await self._respond(description, speak=text)
+        await params.result_callback(None)
 
     @tool
     async def show_trending(self, params: FunctionCallParams, genre: str | None = None):
@@ -524,7 +555,7 @@ class UIAgent(LLMAgent):
         """Pop one screen off the navigation stack."""
         logger.info(f"{self}: go_back")
         description = await self._do_go_back()
-        await self._respond(description)
+        await self._respond(description, speak=description)
         await params.result_callback(None)
 
     @tool
@@ -532,7 +563,7 @@ class UIAgent(LLMAgent):
         """Reset the navigation stack to the home grid."""
         logger.info(f"{self}: go_home")
         description = await self._do_go_home()
-        await self._respond(description)
+        await self._respond(description, speak="Home.")
         await params.result_callback(None)
 
     @tool
@@ -546,47 +577,11 @@ class UIAgent(LLMAgent):
         await self._respond(f"Described screen: {text}", speak=text)
         await params.result_callback(None)
 
-    async def _answer_question(
-        self,
-        mode: str,
-        question: str,
-        about: str | None,
-        params: FunctionCallParams,
-    ) -> None:
-        logger.info(f"{self}: answer_{mode}('{question}', about={about!r})")
-        artist = self._current_context_artist()
-        if artist is None:
-            await self._respond(
-                "I can only answer questions about an artist you're currently viewing.",
-                speak="Pick an artist first and ask again.",
-            )
-            await params.result_callback(None)
-            return
-
-        answer = await descriptions.answer_question(
-            mode=mode,
-            question=question,
-            artist_name=artist["name"],
-            albums=artist.get("albums") or [],
-            songs=artist.get("songs") or [],
-        )
-        if not answer:
-            fallback = "I'm not sure about that one."
-            await self._respond(fallback, speak=fallback)
-            await params.result_callback(None)
-            return
-
-        toast_emitted = False
-        if about:
-            toast_emitted = await self._emit_answer_toast(artist, about, answer)
-
-        description = (
-            f"Answer ({mode}) about {artist['name']}: {answer}"
-            if not toast_emitted
-            else f"Answer toast ({mode}) on {artist['name']}: {answer}"
-        )
-        await self._respond(description, speak=answer)
-        await params.result_callback(None)
+    # ``scroll_to`` and ``highlight`` are inherited from
+    # ``ScrollToToolMixin`` / ``HighlightToolMixin``. The SDK mixin
+    # tools dispatch the UI command, complete the in-flight task with
+    # an empty response, and exit silently. The visual change on the
+    # client (the scroll, the highlight) is the user-facing feedback.
 
     def _current_context_artist(self) -> dict | None:
         """Best-effort: return the artist whose page the user is on."""
@@ -607,14 +602,14 @@ class UIAgent(LLMAgent):
         if not target:
             return False
         if target == (artist.get("name") or "").strip().lower():
-            await self._send_frame(
-                {
-                    "type": "toast",
-                    "title": artist["name"],
-                    "subtitle": artist.get("genre") or "Artist",
-                    "image_url": artist.get("image_url") or "",
-                    "description": answer,
-                }
+            await self.send_command(
+                "toast",
+                Toast(
+                    title=artist["name"],
+                    subtitle=artist.get("genre") or "Artist",
+                    image_url=artist.get("image_url") or "",
+                    description=answer,
+                ),
             )
             return True
         resolved = await self._catalog_resolve_item(about)
@@ -628,36 +623,24 @@ class UIAgent(LLMAgent):
         subtitle = f"{resolved_artist['name']} · {label}"
         if kind == "album" and year:
             subtitle = f"{subtitle} · {year}"
-        await self._send_frame(
-            {
-                "type": "toast",
-                "title": item["title"],
-                "subtitle": subtitle,
-                "image_url": item.get("cover_url") or resolved_artist.get("image_url") or "",
-                "description": answer,
-            }
+        await self.send_command(
+            "toast",
+            Toast(
+                title=item["title"],
+                subtitle=subtitle,
+                image_url=item.get("cover_url") or resolved_artist.get("image_url") or "",
+                description=answer,
+            ),
         )
         return True
 
     # ------------------------------------------------------------------
-    # Client click dispatcher
+    # Click handlers (invoked from @on_ui_event dispatch)
     # ------------------------------------------------------------------
-
-    async def _handle_client_event(self, data: dict) -> None:
-        kind = data.get("kind")
-        if kind == "hello":
-            # The client just finished the RTVI handshake and asked for
-            # the current screen. Re-emit the state of the top of the
-            # nav stack so the view is correct after reconnect, too.
-            await self._emit_for_top()
-        elif kind == "nav":
-            await self._handle_nav_click(data)
-        elif kind == "action":
-            await self._handle_action_click(data)
-        elif kind == "set_tab":
-            await self._handle_set_tab_click(data)
-        elif kind == "play_track":
-            await self._handle_play_track_click(data)
+    #
+    # The ``UIAgent`` base injects a ``<ui_event>`` developer message for
+    # every client event before the handler runs, so these no longer
+    # append ``[click] ...`` prose themselves.
 
     async def _handle_play_track_click(self, data: dict) -> None:
         artist = await self._catalog_get_artist(data.get("artist_id", ""))
@@ -673,9 +656,8 @@ class UIAgent(LLMAgent):
             and self._state.playing_artist_id == artist["id"]
             and self._state.playing.get("id") == track_id
         ):
-            await self._send_frame({"type": "playback_control", "action": "stop"})
+            await self.send_command("playback_control", {"action": "stop"})
             await self._do_stop_playback()
-            await self._inject_ui_update("[click] Stopped playback.")
             return
         tracks = album.get("tracks") or []
         if not tracks:
@@ -684,8 +666,7 @@ class UIAgent(LLMAgent):
         track = next((t for t in tracks if t["id"] == track_id), None)
         if not track:
             return
-        description = await self._do_play_track(artist, album, track)
-        await self._inject_ui_update(f"[click] {description}")
+        await self._do_play_track(artist, album, track)
 
     async def _handle_set_tab_click(self, data: dict) -> None:
         tab = data.get("tab")
@@ -696,20 +677,18 @@ class UIAgent(LLMAgent):
         if not artist:
             return
         await self._activate_tab(artist, tab)
-        await self._inject_ui_update(f"[click] Switched to {tab} tab on {artist['name']}.")
 
     async def _handle_nav_click(self, data: dict) -> None:
         view = data.get("view")
-        description = ""
         if view == "home":
-            description = await self._do_go_home()
+            await self._do_go_home()
         elif view == "back":
-            description = await self._do_go_back()
+            await self._do_go_back()
         elif view == "artist":
             artist = await self._catalog_get_artist(data.get("artist_id", ""))
             if not artist:
                 return
-            description = await self._do_navigate_to_artist(artist)
+            await self._do_navigate_to_artist(artist)
         elif view == "detail":
             artist = await self._catalog_get_artist(data.get("artist_id", ""))
             kind = data.get("detail_kind")
@@ -719,10 +698,7 @@ class UIAgent(LLMAgent):
             item = self._find_item_in_artist(artist, kind, item_id)
             if not item:
                 return
-            description = await self._do_select_item(artist, kind, item)
-        else:
-            return
-        await self._inject_ui_update(f"[click] {description}")
+            await self._do_select_item(artist, kind, item)
 
     async def _handle_action_click(self, data: dict) -> None:
         action = data.get("action")
@@ -741,16 +717,12 @@ class UIAgent(LLMAgent):
         if not kind or item is None:
             return
         if action == "play":
-            description = await self._do_play(artist, kind, item)
+            await self._do_play(artist, kind, item)
         elif action == "show_info":
             long_desc = await self._catalog_get_description(kind, item["id"], "long")
             await self._emit_item_toast(artist, kind, item, long_desc)
-            description = f"Info toast: {item['title']}."
         elif action == "add_to_favorites":
-            description = await self._do_add_favorite(artist, kind, item)
-        else:
-            return
-        await self._inject_ui_update(f"[click] {description}")
+            await self._do_add_favorite(artist, kind, item)
 
     # ------------------------------------------------------------------
     # Action helpers (shared by tools and click dispatcher)
@@ -759,7 +731,7 @@ class UIAgent(LLMAgent):
     async def _do_navigate_to_artist(self, artist: dict) -> str:
         self._enter(NavFrame(screen="artist", artist_id=artist["id"]))
         await self._emit_artist(artist)
-        return self._describe_artist_screen(artist)
+        return f"Showing {artist['name']}."
 
     async def _do_select_item(self, artist: dict, kind: Kind, item: dict) -> str:
         top = self._top()
@@ -769,7 +741,7 @@ class UIAgent(LLMAgent):
             NavFrame(screen="detail", artist_id=artist["id"], kind=kind, item_id=item["id"])
         )
         await self._emit_detail(artist, kind, item)
-        return self._describe_detail_screen(artist, kind, item)
+        return f"{item.get('title', 'Item')} by {artist['name']}."
 
     async def _do_play(self, artist: dict, kind: Kind, item: dict) -> str:
         top = self._top()
@@ -790,14 +762,14 @@ class UIAgent(LLMAgent):
                 item["preview_url"] = preview_url
         self._state.playing = item
         self._state.playing_artist_id = artist["id"]
-        await self._send_frame(
+        await self.send_command(
+            "playback",
             {
-                "type": "playback",
                 "state": "playing",
                 "item_title": item["title"],
                 "item_id": item["id"],
                 "preview_url": preview_url,
-            }
+            },
         )
         await self._emit_detail(artist, kind, item)
         return f"Now playing {item['title']} by {artist['name']}."
@@ -814,14 +786,14 @@ class UIAgent(LLMAgent):
         }
         self._state.playing = synthetic
         self._state.playing_artist_id = artist["id"]
-        await self._send_frame(
+        await self.send_command(
+            "playback",
             {
-                "type": "playback",
                 "state": "playing",
                 "item_title": track["title"],
                 "item_id": track["id"],
                 "preview_url": synthetic["preview_url"],
-            }
+            },
         )
         await self._emit_detail(artist, "album", album)
         return f"Now playing {track['title']} from {album['title']}."
@@ -843,12 +815,12 @@ class UIAgent(LLMAgent):
         if is_new:
             self._state.favorite_keys.add(key)
             self._state.favorites.append(self._favorite_record(artist, kind, item))
-        await self._send_frame(
+        await self.send_command(
+            "favorite_added",
             {
-                "type": "favorite_added",
                 "favorite": self._favorite_record(artist, kind, item),
                 "favorites": list(self._state.favorites),
-            }
+            },
         )
         top = self._top()
         if top.screen == "detail" and top.artist_id == artist["id"] and top.item_id == item["id"]:
@@ -940,6 +912,39 @@ class UIAgent(LLMAgent):
             "item_title": item["title"],
             "cover_url": item.get("cover_url"),
         }
+
+    def _seed_demo_favorites(self) -> None:
+        """Seed the Favorites grid with a couple of well-known items.
+
+        Demo only. Lets "scroll to my favorites" and "point at X" land
+        on something concrete instead of the empty-state placeholder.
+        Navigation into seeded items may not resolve if Deezer's IDs
+        drift; that's acceptable for a review demo.
+        """
+        seeds: list[dict] = [
+            {
+                "artist_id": "399",
+                "artist_name": "Radiohead",
+                "kind": "album",
+                "item_id": "7521880",
+                "item_title": "In Rainbows",
+                "cover_url": None,
+            },
+            {
+                "artist_id": "1194053",
+                "artist_name": "Bad Bunny",
+                "kind": "album",
+                "item_id": "656407741",
+                "item_title": "DeBÍ TiRAR MáS FOToS",
+                "cover_url": None,
+            },
+        ]
+        for fav in seeds:
+            key = self._favorite_key(fav["artist_id"], fav["kind"], fav["item_id"])
+            if key in self._state.favorite_keys:
+                continue
+            self._state.favorite_keys.add(key)
+            self._state.favorites.append(fav)
 
     # ------------------------------------------------------------------
     # CatalogAgent task calls
@@ -1080,31 +1085,27 @@ class UIAgent(LLMAgent):
             self._catalog_list_home(),
             self._catalog_list_new_releases(limit=16),
         )
-        await self._send_frame(
+        await self.send_command(
+            "screen",
             {
-                "type": "screen",
                 "screen": "home",
                 "artists": artists,
                 "new_releases": new_releases,
                 "favorites": list(self._state.favorites),
-            }
-        )
-        await self._inject_ui_update(
-            self._describe_home_screen(artists, new_releases, self._state.favorites)
+            },
         )
 
     async def _emit_artist(self, artist: dict) -> None:
         tab = self._get_artist_tab(artist["id"])
-        await self._send_frame(
+        await self.send_command(
+            "screen",
             {
-                "type": "screen",
                 "screen": "artist",
                 "artist": artist,
                 "active_tab": tab,
                 "back_enabled": len(self._state.stack) > 1,
-            }
+            },
         )
-        await self._inject_ui_update(self._describe_artist_screen(artist))
 
     def _get_artist_tab(self, artist_id: str) -> ArtistTab:
         return self._state.active_tab_by_artist.get(artist_id, "albums")
@@ -1143,9 +1144,9 @@ class UIAgent(LLMAgent):
             and self._state.playing_artist_id == artist["id"]
             and self._state.playing.get("id") == item["id"]
         )
-        await self._send_frame(
+        await self.send_command(
+            "screen",
             {
-                "type": "screen",
                 "screen": "detail",
                 "kind": kind,
                 "item": item,
@@ -1159,22 +1160,20 @@ class UIAgent(LLMAgent):
                     else None
                 ),
                 "back_enabled": len(self._state.stack) > 1,
-            }
+            },
         )
-        await self._inject_ui_update(self._describe_detail_screen(artist, kind, item))
 
     async def _emit_trending(self, label: str, artists: list[dict], genre: str | None) -> None:
-        await self._send_frame(
+        await self.send_command(
+            "screen",
             {
-                "type": "screen",
                 "screen": "trending",
                 "label": label,
                 "genre": genre,
                 "artists": artists,
                 "back_enabled": len(self._state.stack) > 1,
-            }
+            },
         )
-        await self._inject_ui_update(self._describe_trending_screen(label, artists))
 
     async def _emit_for_top(self) -> None:
         top = self._top()
@@ -1208,14 +1207,14 @@ class UIAgent(LLMAgent):
             or ""
         )
         genre = artist.get("genre") or "Artist"
-        await self._send_frame(
-            {
-                "type": "toast",
-                "title": artist["name"],
-                "subtitle": genre,
-                "image_url": artist.get("image_url") or "",
-                "description": text,
-            }
+        await self.send_command(
+            "toast",
+            Toast(
+                title=artist["name"],
+                subtitle=genre,
+                image_url=artist.get("image_url") or "",
+                description=text,
+            ),
         )
 
     async def _emit_item_toast(
@@ -1229,29 +1228,19 @@ class UIAgent(LLMAgent):
         subtitle = f"{artist['name']} · {label}"
         if kind == "album" and year:
             subtitle = f"{subtitle} · {year}"
-        await self._send_frame(
-            {
-                "type": "toast",
-                "title": item["title"],
-                "subtitle": subtitle,
-                "image_url": item.get("cover_url") or artist.get("image_url") or "",
-                "description": text,
-            }
-        )
-
-    async def _send_frame(self, data: dict) -> None:
-        await self.send_message(
-            BusFrameMessage(
-                source=self.name,
-                target="music",
-                frame=RTVIServerMessageFrame(data=data),
-                direction=FrameDirection.DOWNSTREAM,
-            )
+        await self.send_command(
+            "toast",
+            Toast(
+                title=item["title"],
+                subtitle=subtitle,
+                image_url=item.get("cover_url") or artist.get("image_url") or "",
+                description=text,
+            ),
         )
 
     async def _send_scroll(self, target: str) -> None:
         """Ask the client to scroll a ``data-scroll-target`` section into view."""
-        await self._send_frame({"type": "scroll_to", "target": target})
+        await self.send_command("scroll_to", ScrollTo(target_id=target))
 
     # ------------------------------------------------------------------
     # Response + LLM context
@@ -1264,102 +1253,10 @@ class UIAgent(LLMAgent):
         speak: str | None = None,
         status: TaskStatus = TaskStatus.COMPLETED,
     ) -> None:
-        await self._inject_ui_update(description)
-        if self._current_message is None:
-            return
-        task_id = self._current_message.task_id
-        self._current_message = None
-        response: dict = {"description": description}
-        if speak:
-            response["speak"] = speak
-        await self.send_task_response(task_id, response=response, status=status)
-
-    async def _inject_ui_update(self, description: str) -> None:
-        if not description:
-            return
-        await self.queue_frame(
-            LLMMessagesAppendFrame(
-                messages=[{"role": "developer", "content": f"[UI update] {description}"}],
-                run_llm=False,
-            )
+        # Music-player convention: every tool result carries a
+        # ``description`` (for the voice agent's LLM-paraphrase
+        # fallback) plus an optional ``speak`` (for verbatim TTS).
+        # ``respond_to_task`` handles the task-id lookup + bookkeeping.
+        await self.respond_to_task(
+            {"description": description}, speak=speak, status=status
         )
-
-    # ------------------------------------------------------------------
-    # Screen descriptions (grid layout + state) for the LLM context
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _describe_home_screen(
-        artists: list[dict], new_releases: list[dict], favorites: list[dict]
-    ) -> str:
-        sections = [UIAgent._describe_grid(artists, "Trending artists")]
-        release_items = [
-            {"title": f"{r.get('title', '')} — {r.get('artist_name', '')}"} for r in new_releases
-        ]
-        sections.append(UIAgent._describe_grid(release_items, "New releases"))
-        fav_items = [
-            {"title": f"{f.get('item_title', '')} — {f.get('artist_name', '')}"} for f in favorites
-        ]
-        if fav_items:
-            sections.append(UIAgent._describe_grid(fav_items, "Favorites"))
-        else:
-            sections.append("Favorites grid: empty.")
-        return "Home screen. " + " ".join(sections)
-
-    @staticmethod
-    def _describe_grid(items: list[dict], label: str, cols: int = 8) -> str:
-        # Items are albums/songs (keyed by ``title``) or minimal artist
-        # records (keyed by ``name``). Accept either.
-        parts = [
-            f"row {i // cols + 1} col {i % cols + 1}: "
-            + str(item.get("title") or item.get("name") or "")
-            for i, item in enumerate(items)
-        ]
-        rows = max(1, (len(items) - 1) // cols + 1) if items else 0
-        return f"{label} grid ({rows} rows x {cols} columns): " + "; ".join(parts)
-
-    def _describe_artist_screen(self, artist: dict) -> str:
-        tab = self._get_artist_tab(artist["id"])
-        if tab == "songs":
-            grid_desc = self._describe_grid(artist.get("songs") or [], "Songs")
-        elif tab == "related":
-            related = artist.get("related_artists") or []
-            grid_desc = (
-                self._describe_grid(related, "Related artists")
-                if related
-                else "Related artists grid: empty (fetching)."
-            )
-        else:
-            grid_desc = self._describe_grid(artist.get("albums") or [], "Albums")
-        return (
-            f"Artist screen: {artist['name']} ({tab} tab active). {grid_desc} "
-            f"Tabs available: Albums, Songs, Related artists."
-        )
-
-    @staticmethod
-    def _describe_trending_screen(label: str, artists: list[dict]) -> str:
-        return f"{label} screen. " + UIAgent._describe_grid(artists, "Trending", cols=8)
-
-    def _describe_detail_screen(self, artist: dict, kind: Kind, item: dict) -> str:
-        is_favorite = (
-            self._favorite_key(artist["id"], kind, item["id"]) in self._state.favorite_keys
-        )
-        is_playing = (
-            self._state.playing is not None
-            and self._state.playing_artist_id == artist["id"]
-            and self._state.playing.get("id") == item["id"]
-        )
-        flags = []
-        if is_playing:
-            flags.append("playing")
-        if is_favorite:
-            flags.append("favorited")
-        flags_text = f" ({', '.join(flags)})" if flags else ""
-        short = item.get("short_description") or ""
-        base = f"Detail screen: {kind} '{item['title']}' by {artist['name']}{flags_text}. {short}"
-        if kind == "album":
-            tracks = item.get("tracks") or []
-            if tracks:
-                parts = [f"{i + 1}. {t['title']}" for i, t in enumerate(tracks)]
-                base += " Tracklist: " + "; ".join(parts) + "."
-        return base

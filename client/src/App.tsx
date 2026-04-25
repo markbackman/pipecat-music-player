@@ -1,7 +1,6 @@
 import { useEffect, useRef } from "react";
 import type { PipecatBaseChildProps } from "@pipecat-ai/voice-ui-kit";
-import { RTVIEvent } from "@pipecat-ai/client-js";
-import { useRTVIClientEvent } from "@pipecat-ai/client-react";
+import { UIAgentProvider, useA11ySnapshot } from "@pipecat-ai/client-react";
 import { useServerMessages } from "./hooks/useServerMessages";
 import { useClickSender } from "./hooks/useClickSender";
 import { Header } from "./components/Header";
@@ -26,22 +25,24 @@ function screenIdentity(s: Screen): string {
   }
 }
 
-export function App({
-  handleConnect,
-  handleDisconnect,
-}: PipecatBaseChildProps) {
+export function App(props: PipecatBaseChildProps) {
+  return (
+    <UIAgentProvider client={props.client ?? undefined}>
+      <AppInner {...props} />
+    </UIAgentProvider>
+  );
+}
+
+function AppInner({ handleConnect, handleDisconnect }: PipecatBaseChildProps) {
   const { screen, toast, nowPlaying, closeToast } = useServerMessages();
   const sendClick = useClickSender();
   const mainRef = useRef<HTMLElement>(null);
   const lastScreenId = useRef<string | null>(null);
 
-  // Ask the server to re-emit the current screen once both sides have
-  // finished the RTVI handshake. Emitting earlier (from the UI agent's
-  // on_activated) can race the client's listener registration and drop
-  // the frame.
-  useRTVIClientEvent(RTVIEvent.BotReady, () => {
-    sendClick({ kind: "hello" });
-  });
+  // Spike: stream an accessibility snapshot of the app to the server
+  // so the UI agent has structural awareness of what's on screen
+  // without hand-written prose descriptions.
+  useA11ySnapshot();
 
   // Reset the scroll position to the top whenever we land on a
   // different page. Same-page data updates (e.g. the Related Artists
