@@ -45,8 +45,6 @@ from pipecat_subagents.agents import (
 from pipecat_subagents.agents import UIAgent as BaseUIAgent
 from pipecat_subagents.bus import AgentBus, BusTaskRequestMessage, BusUIEventMessage
 
-import descriptions
-
 Screen = Literal["home", "artist", "detail", "trending"]
 Kind = Literal["album", "song"]
 
@@ -90,17 +88,16 @@ screen; navigates to its detail page and starts playback.
 ``title`` may name an album, a song, or an artist; the server resolves \
 all three. Works from any screen. Use when the user asks "tell me \
 about X" and X is a specific album/song/artist they named.
-- ``answer_about_catalog(question, about=None)``: Answer a factual \
-question about the artist in focus using their catalog (latest album, \
-first album, release year, track count, duration). Speaks a short \
-answer. Pass ``about`` with the item title only if the answer pivots \
-on one specific album or song the user should see a toast for.
-- ``answer_about_music(question, about=None)``: Answer an opinion or \
-trivia question about the current artist (most popular album, best \
-entry point, who influenced them, are they still active). Uses the \
-model's general music knowledge, grounded by the catalog. Speaks a \
-short answer. Pass ``about`` only when the answer centers on a \
-specific album or song.
+- ``answer(text, about=None)``: Answer a question about the current \
+artist or screen. Write the spoken reply in ``text`` directly — \
+one or two short sentences, no markdown or lists. Ground factual \
+claims in what you see in ``<ui_state>`` (album titles, release \
+years on tiles, track titles, durations, track counts). Use your \
+general music knowledge for trivia: awards, Grammys, chart \
+performance, influences, biography, critical reception, \
+collaborations, cultural context. Pass ``about`` only when the \
+answer centers on a specific album or song the user should see a \
+toast for.
 - ``add_to_favorites(item_title)``: Mark an album or song as a \
 favorite. Works from any screen.
 - ``show_albums()``: Switch the current Artist page to its Albums \
@@ -148,12 +145,13 @@ artist without a specific title.
 to switch the Artist page tab when the user asks for one of those \
 categories in the abstract ("show me the albums", "who's similar"). \
 Use ``show_trending`` for popularity / chart questions.
-6. Use ``describe_screen`` only for questions about the screen as a \
-whole ("where am I", "what is this page"). For questions about a \
-specific named item, use ``show_info`` or ``select_item``. For \
-conversational questions about the current artist (catalog facts, \
-opinions, trivia), use ``answer_about_catalog`` or \
-``answer_about_music``.
+6. Use ``describe_screen`` only for meta questions about the \
+current screen ("where am I", "what is this page"). Use \
+``show_info`` for "tell me about X" on a specific named item. Use \
+``answer`` for conversational questions about the current artist \
+(catalog facts, opinions, trivia, awards) — write the spoken reply \
+in ``text`` directly. Ground visible facts in ``<ui_state>``; use \
+training knowledge for trivia.
 
 """
 
@@ -203,7 +201,6 @@ class UIAgent(ScrollToToolMixin, HighlightToolMixin, BaseUIAgent):
         super().__init__(name, bus=bus, active=True)
         self._state = UIState()
         self._seed_demo_favorites()
-        self._current_message: BusTaskRequestMessage | None = None
 
     def build_llm(self) -> LLMService:
         return OpenAILLMService(
@@ -235,13 +232,12 @@ class UIAgent(ScrollToToolMixin, HighlightToolMixin, BaseUIAgent):
         await self._emit_for_top()
 
     async def on_task_request(self, message: BusTaskRequestMessage) -> None:
-        # UIAgent's base handles <ui_state> auto-injection before we
-        # append the query, so the LLM always reasons over the current
-        # screen.
+        # UIAgent's base records the in-flight task on ``current_task``
+        # and auto-injects ``<ui_state>`` before we append the query,
+        # so the LLM always reasons over the current screen.
         await super().on_task_request(message)
         query = (message.payload or {}).get("query", "")
         logger.info(f"{self}: task query '{query}'")
-        self._current_message = message
         await self.queue_frame(
             LLMMessagesAppendFrame(
                 messages=[{"role": "developer", "content": query}],
@@ -283,11 +279,12 @@ class UIAgent(ScrollToToolMixin, HighlightToolMixin, BaseUIAgent):
         logger.info(f"{self}: navigate_to_artist('{artist_name}')")
         artist = await self._catalog_find_artist(artist_name)
         if not artist:
-            await self._respond(f"I could not find {artist_name} in the library.")
+            msg = f"I could not find {artist_name} in the library."
+            await self._respond(msg, speak=msg)
             await params.result_callback(None)
             return
         description = await self._do_navigate_to_artist(artist)
-        await self._respond(description)
+        await self._respond(description, speak=description)
         await params.result_callback(None)
 
     @tool
@@ -300,14 +297,15 @@ class UIAgent(ScrollToToolMixin, HighlightToolMixin, BaseUIAgent):
         logger.info(f"{self}: select_item('{item_title}')")
         resolved = await self._catalog_resolve_item(item_title)
         if not resolved:
-            await self._respond(f"I could not find {item_title} in the library.")
+            msg = f"I could not find {item_title} in the library."
+            await self._respond(msg, speak=msg)
             await params.result_callback(None)
             return
         artist = resolved["artist"]
         kind: Kind = resolved["kind"]
         item = resolved["item"]
         description = await self._do_select_item(artist, kind, item)
-        await self._respond(description)
+        await self._respond(description, speak=description)
         await params.result_callback(None)
 
     @tool
@@ -320,7 +318,8 @@ class UIAgent(ScrollToToolMixin, HighlightToolMixin, BaseUIAgent):
         logger.info(f"{self}: play('{item_title}')")
         resolved = await self._catalog_resolve_item(item_title)
         if not resolved:
-            await self._respond(f"I could not find {item_title} in the library.")
+            msg = f"I could not find {item_title} in the library."
+            await self._respond(msg, speak=msg)
             await params.result_callback(None)
             return
         artist = resolved["artist"]
@@ -371,7 +370,8 @@ class UIAgent(ScrollToToolMixin, HighlightToolMixin, BaseUIAgent):
 
         resolved = await self._catalog_resolve_item(title)
         if not resolved:
-            await self._respond(f"I could not find {title} in the library.")
+            msg = f"I could not find {title} in the library."
+            await self._respond(msg, speak=msg)
             await params.result_callback(None)
             return
         artist = resolved["artist"]
@@ -395,14 +395,15 @@ class UIAgent(ScrollToToolMixin, HighlightToolMixin, BaseUIAgent):
         logger.info(f"{self}: add_to_favorites('{item_title}')")
         resolved = await self._catalog_resolve_item(item_title)
         if not resolved:
-            await self._respond(f"I could not find {item_title} in the library.")
+            msg = f"I could not find {item_title} in the library."
+            await self._respond(msg, speak=msg)
             await params.result_callback(None)
             return
         artist = resolved["artist"]
         kind: Kind = resolved["kind"]
         item = resolved["item"]
         description = await self._do_add_favorite(artist, kind, item)
-        await self._respond(description)
+        await self._respond(description, speak="Added.")
         await params.result_callback(None)
 
     @tool
@@ -415,7 +416,8 @@ class UIAgent(ScrollToToolMixin, HighlightToolMixin, BaseUIAgent):
         logger.info(f"{self}: control_playback('{action}')")
         normalized = action.strip().lower()
         if normalized not in ("pause", "resume", "stop"):
-            await self._respond(f"Unknown playback action: {action}.")
+            msg = f"Unknown playback action: {action}."
+            await self._respond(msg, speak=msg)
             await params.result_callback(None)
             return
         if self._state.playing is None:
@@ -439,7 +441,8 @@ class UIAgent(ScrollToToolMixin, HighlightToolMixin, BaseUIAgent):
         logger.info(f"{self}: show_similar_artists")
         artist = await self._current_artist_for_tab_switch()
         if artist is None:
-            await self._respond("I can only show similar artists while you're on an artist page.")
+            msg = "I can only show similar artists while you're on an artist page."
+            await self._respond(msg, speak=msg)
             await params.result_callback(None)
             return
         await self._activate_tab(artist, "related")
@@ -462,7 +465,8 @@ class UIAgent(ScrollToToolMixin, HighlightToolMixin, BaseUIAgent):
         logger.info(f"{self}: show_albums")
         artist = await self._current_artist_for_tab_switch()
         if artist is None:
-            await self._respond("I can only switch tabs while you're on an artist page.")
+            msg = "I can only switch tabs while you're on an artist page."
+            await self._respond(msg, speak=msg)
             await params.result_callback(None)
             return
         await self._activate_tab(artist, "albums")
@@ -478,7 +482,8 @@ class UIAgent(ScrollToToolMixin, HighlightToolMixin, BaseUIAgent):
         logger.info(f"{self}: show_songs")
         artist = await self._current_artist_for_tab_switch()
         if artist is None:
-            await self._respond("I can only switch tabs while you're on an artist page.")
+            msg = "I can only switch tabs while you're on an artist page."
+            await self._respond(msg, speak=msg)
             await params.result_callback(None)
             return
         await self._activate_tab(artist, "songs")
@@ -489,38 +494,41 @@ class UIAgent(ScrollToToolMixin, HighlightToolMixin, BaseUIAgent):
         await params.result_callback(None)
 
     @tool
-    async def answer_about_catalog(
+    async def answer(
         self,
         params: FunctionCallParams,
-        question: str,
+        text: str,
         about: str | None = None,
     ):
-        """Answer a factual question about the current artist's catalog.
+        """Answer a question about the current artist or screen.
+
+        Ground factual claims in what you see in ``<ui_state>``
+        (album titles, release years on tiles, track titles,
+        durations, track counts). For trivia — awards, Grammys,
+        chart performance, influences, biography, critical
+        reception, collaborations, cultural context — use your
+        general music knowledge. Keep the reply to one or two
+        short spoken sentences.
 
         Args:
-            question: The user's question, passed verbatim.
-            about: Optional album, song, or artist title the answer \
-                pivots on. When provided, the server raises a toast \
-                for that item alongside the spoken answer.
+            text: The spoken answer in plain language (TTS-ready).
+            about: Optional album, song, or artist title the answer
+                pivots on. When the title resolves to a catalog
+                item, the server raises a toast for it alongside
+                the spoken answer.
         """
-        await self._answer_question("catalog", question, about, params)
-
-    @tool
-    async def answer_about_music(
-        self,
-        params: FunctionCallParams,
-        question: str,
-        about: str | None = None,
-    ):
-        """Answer an opinion or trivia question about the current artist.
-
-        Args:
-            question: The user's question, passed verbatim.
-            about: Optional album, song, or artist title the answer \
-                pivots on. When provided, the server raises a toast \
-                for that item alongside the spoken answer.
-        """
-        await self._answer_question("music", question, about, params)
+        logger.info(f"{self}: answer('{text[:60]}...', about={about!r})")
+        artist = self._current_context_artist()
+        toast_emitted = False
+        if artist is not None and about:
+            toast_emitted = await self._emit_answer_toast(artist, about, text)
+        description = (
+            f"Answer on {artist['name']}: {text}"
+            if artist and toast_emitted
+            else f"Answer: {text}"
+        )
+        await self._respond(description, speak=text)
+        await params.result_callback(None)
 
     @tool
     async def show_trending(self, params: FunctionCallParams, genre: str | None = None):
@@ -547,7 +555,7 @@ class UIAgent(ScrollToToolMixin, HighlightToolMixin, BaseUIAgent):
         """Pop one screen off the navigation stack."""
         logger.info(f"{self}: go_back")
         description = await self._do_go_back()
-        await self._respond(description)
+        await self._respond(description, speak=description)
         await params.result_callback(None)
 
     @tool
@@ -555,7 +563,7 @@ class UIAgent(ScrollToToolMixin, HighlightToolMixin, BaseUIAgent):
         """Reset the navigation stack to the home grid."""
         logger.info(f"{self}: go_home")
         description = await self._do_go_home()
-        await self._respond(description)
+        await self._respond(description, speak="Home.")
         await params.result_callback(None)
 
     @tool
@@ -569,75 +577,11 @@ class UIAgent(ScrollToToolMixin, HighlightToolMixin, BaseUIAgent):
         await self._respond(f"Described screen: {text}", speak=text)
         await params.result_callback(None)
 
-    async def _answer_question(
-        self,
-        mode: str,
-        question: str,
-        about: str | None,
-        params: FunctionCallParams,
-    ) -> None:
-        logger.info(f"{self}: answer_{mode}('{question}', about={about!r})")
-        artist = self._current_context_artist()
-        if artist is None:
-            await self._respond(
-                "I can only answer questions about an artist you're currently viewing.",
-                speak="Pick an artist first and ask again.",
-            )
-            await params.result_callback(None)
-            return
-
-        about_tracks = await self._resolve_about_tracks(artist, about) if about else None
-        answer = await descriptions.answer_question(
-            mode=mode,
-            question=question,
-            artist_name=artist["name"],
-            albums=artist.get("albums") or [],
-            songs=artist.get("songs") or [],
-            about=about,
-            about_tracks=about_tracks,
-        )
-        if not answer:
-            fallback = "I'm not sure about that one."
-            await self._respond(fallback, speak=fallback)
-            await params.result_callback(None)
-            return
-
-        toast_emitted = False
-        if about:
-            toast_emitted = await self._emit_answer_toast(artist, about, answer)
-
-        description = (
-            f"Answer ({mode}) about {artist['name']}: {answer}"
-            if not toast_emitted
-            else f"Answer toast ({mode}) on {artist['name']}: {answer}"
-        )
-        await self._respond(description, speak=answer)
-        await params.result_callback(None)
-
-    async def _resolve_about_tracks(self, artist: dict, about: str) -> list[dict] | None:
-        """Return the tracklist for ``about`` when it names an album.
-
-        Looks in the current artist's album list first (the common
-        case, since the user is typically on a detail page). Fetches
-        from the catalog on demand if the album is known but its
-        tracks haven't been loaded yet. Returns ``None`` for songs,
-        artist names, or unresolved strings.
-        """
-        target = (about or "").strip().lower()
-        if not target:
-            return None
-        for alb in artist.get("albums") or []:
-            if (alb.get("title") or "").strip().lower() != target:
-                continue
-            tracks = alb.get("tracks")
-            if tracks:
-                return tracks
-            fetched = await self._catalog_get_album_tracks(alb.get("id", ""))
-            if fetched:
-                alb["tracks"] = fetched
-                return fetched
-            return None
-        return None
+    # ``scroll_to`` and ``highlight`` are inherited from
+    # ``ScrollToToolMixin`` / ``HighlightToolMixin``. The SDK mixin
+    # tools dispatch the UI command, complete the in-flight task with
+    # an empty response, and exit silently. The visual change on the
+    # client (the scroll, the highlight) is the user-facing feedback.
 
     def _current_context_artist(self) -> dict | None:
         """Best-effort: return the artist whose page the user is on."""
@@ -1309,11 +1253,10 @@ class UIAgent(ScrollToToolMixin, HighlightToolMixin, BaseUIAgent):
         speak: str | None = None,
         status: TaskStatus = TaskStatus.COMPLETED,
     ) -> None:
-        if self._current_message is None:
-            return
-        task_id = self._current_message.task_id
-        self._current_message = None
-        response: dict = {"description": description}
-        if speak:
-            response["speak"] = speak
-        await self.send_task_response(task_id, response=response, status=status)
+        # Music-player convention: every tool result carries a
+        # ``description`` (for the voice agent's LLM-paraphrase
+        # fallback) plus an optional ``speak`` (for verbatim TTS).
+        # ``respond_to_task`` handles the task-id lookup + bookkeeping.
+        await self.respond_to_task(
+            {"description": description}, speak=speak, status=status
+        )

@@ -116,7 +116,13 @@ class VoiceAgent(LLMAgent):
             )
             await self.queue_frame(TTSSpeakFrame(text=speak))
             await params.result_callback(None)
-        else:
+        elif description:
             # Let the voice LLM phrase the confirmation from the
             # description.
             await params.result_callback(description)
+        else:
+            # Silent fire-and-forget: the SDK mixin tools (scroll_to,
+            # highlight) complete the task with an empty response. The
+            # visual change on the client is the user-facing feedback;
+            # don't re-run the LLM for it.
+            await params.result_callback(None)
