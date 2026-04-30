@@ -11,14 +11,13 @@ MusicAgent (transport + BusBridge + UI bridge)
   ├── VoiceAgent (LLM, bridged)
   │     └── @tool handle_request(query)
   │           └── request_task("ui")
-  └── UIAgent (LLM, not bridged; ScrollToToolMixin + HighlightToolMixin)
+  └── UIAgent (LLM, not bridged)
         ├── tools: navigate_to_artist, select_item, play, control_playback,
         │          show_info, answer, add_to_favorites, show_albums,
         │          show_songs, show_similar_artists, show_trending,
         │          go_back, go_home, describe_screen
-        ├── @on_ui_event handlers: nav, action, set_tab, play_track
-        └── inherited mixin tools: scroll_to, highlight (silent
-            fire-and-forget)
+        ├── silent fire-and-forget tools: scroll_to, highlight
+        └── @on_ui_event handlers: nav, action, set_tab, play_track
 
 CatalogAgent (runner peer, long-lived)
   ├── Deezer-backed artist + album + track cache
@@ -100,5 +99,5 @@ Open http://localhost:5173, click **Connect**, and start talking.
 - **Voice/UI split via task dispatch**: `voice_agent.py` uses `async with self.task("ui", payload={"query": query})` to hand the user's utterance to `ui_agent.py`. The UI agent completes the task with a `speak` field; the voice agent hands that verbatim to TTS without re-running its LLM.
 - **SDK UI agent protocol**: `bot.py` calls `attach_ui_bridge(self, target="ui")` from `on_ready`. Client `UIAgentClient.sendEvent(name, payload)` calls land on the bus as `BusUIEventMessage` and dispatch to `@on_ui_event(name)` handlers on the UI agent. Server-side `send_command(name, payload)` flows the other way through the bridge as an `RTVIServerMessageFrame`.
 - **Accessibility snapshots as `<ui_state>`**: the React client calls `useA11ySnapshot()` near the app root, which streams the document's accessibility tree to the server. The UI agent stores the latest snapshot and auto-injects it as `<ui_state>` at the start of every task, so the LLM always reasons over the current screen.
-- **Silent fire-and-forget mixin tools**: `ScrollToToolMixin` and `HighlightToolMixin` are inherited from the SDK; the LLM picks `scroll_to(ref)` or `highlight(ref)` and the visual change on the client is the user-facing feedback (the voice agent stays quiet for that turn).
+- **Silent fire-and-forget action tools**: `scroll_to(ref)` and `highlight(ref)` are defined locally on the UI agent. They send the UI command, complete the in-flight task with no `speak`, and exit. The visual change on the client is the user-facing feedback; the voice agent stays quiet for that turn. (The shipped SDK mixins ship as chainable side effects so the LLM can compose them with other tools in one turn; this app's prompt is "one tool per turn", so it wires its own silent-terminator versions instead.)
 - **Long-lived singleton agent**: `CatalogAgent` is spawned as a runner peer (not per-connect) so its Deezer cache survives across clients and its expensive warm-up runs once per process.

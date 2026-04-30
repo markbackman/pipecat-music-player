@@ -26,17 +26,13 @@ from typing import Literal
 
 from loguru import logger
 from pipecat.frames.frames import LLMMessagesAppendFrame
-from pipecat.pipeline.pipeline import Pipeline
-from pipecat.processors.aggregators.llm_context import LLMContext
-from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
 from pipecat.services.llm_service import FunctionCallParams, LLMService
 from pipecat.services.openai.base_llm import OpenAILLMSettings
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat_subagents.agents import (
     UI_STATE_PROMPT_GUIDE,
-    HighlightToolMixin,
+    Highlight,
     ScrollTo,
-    ScrollToToolMixin,
     TaskStatus,
     Toast,
     on_ui_event,
@@ -194,7 +190,7 @@ class UIState:
     active_tab_by_artist: dict[str, ArtistTab] = field(default_factory=dict)
 
 
-class UIAgent(ScrollToToolMixin, HighlightToolMixin, BaseUIAgent):
+class UIAgent(BaseUIAgent):
     """Owns UI state and routes voice requests / client clicks to UI actions."""
 
     def __init__(self, name: str, *, bus: AgentBus):
@@ -209,18 +205,6 @@ class UIAgent(ScrollToToolMixin, HighlightToolMixin, BaseUIAgent):
                 system_instruction=SYSTEM_PROMPT,
                 model=os.getenv("OPENAI_MODEL"),
             ),
-        )
-
-    async def build_pipeline(self) -> Pipeline:
-        self._llm = self.create_llm()
-        context = LLMContext()
-        aggregator = LLMContextAggregatorPair(context)
-        return Pipeline(
-            [
-                aggregator.user(),
-                self._llm,
-                aggregator.assistant(),
-            ]
         )
 
     async def on_activated(self, args: dict | None) -> None:
@@ -523,9 +507,7 @@ class UIAgent(ScrollToToolMixin, HighlightToolMixin, BaseUIAgent):
         if artist is not None and about:
             toast_emitted = await self._emit_answer_toast(artist, about, text)
         description = (
-            f"Answer on {artist['name']}: {text}"
-            if artist and toast_emitted
-            else f"Answer: {text}"
+            f"Answer on {artist['name']}: {text}" if artist and toast_emitted else f"Answer: {text}"
         )
         await self._respond(description, speak=text)
         await params.result_callback(None)
@@ -577,11 +559,45 @@ class UIAgent(ScrollToToolMixin, HighlightToolMixin, BaseUIAgent):
         await self._respond(f"Described screen: {text}", speak=text)
         await params.result_callback(None)
 
-    # ``scroll_to`` and ``highlight`` are inherited from
-    # ``ScrollToToolMixin`` / ``HighlightToolMixin``. The SDK mixin
-    # tools dispatch the UI command, complete the in-flight task with
-    # an empty response, and exit silently. The visual change on the
-    # client (the scroll, the highlight) is the user-facing feedback.
+    # ``scroll_to`` and ``highlight`` are silent fire-and-forget: the
+    # tool dispatches the UI command, completes the in-flight task
+    # with an empty response, and exits. The visual change on the
+    # client (the scroll, the highlight) is the user-facing feedback,
+    # and the voice agent's task unblocks immediately so it can move
+    # on without speaking.
+    #
+    # The shipped SDK mixins (``ScrollToToolMixin`` /
+    # ``HighlightToolMixin``) are pure side effects that leave the
+    # task open so the LLM can chain another tool in the same turn.
+    # That shape doesn't match this app's prompt — every tool call
+    # here is meant to be the entire turn — so we wire local
+    # silent-terminator versions instead.
+
+    @tool
+    async def scroll_to(self, params: FunctionCallParams, ref: str):
+        """Scroll an element into view by its snapshot ref.
+
+        Args:
+            ref: Ref string from the most recent ``<ui_state>``,
+                e.g. ``"e42"``.
+        """
+        logger.info(f"{self}: scroll_to(ref={ref!r})")
+        await self.send_command("scroll_to", ScrollTo(ref=ref))
+        await self.respond_to_task()
+        await params.result_callback(None)
+
+    @tool
+    async def highlight(self, params: FunctionCallParams, ref: str):
+        """Briefly flash an element on screen by its snapshot ref.
+
+        Args:
+            ref: Ref string from the most recent ``<ui_state>``,
+                e.g. ``"e42"``.
+        """
+        logger.info(f"{self}: highlight(ref={ref!r})")
+        await self.send_command("highlight", Highlight(ref=ref))
+        await self.respond_to_task()
+        await params.result_callback(None)
 
     def _current_context_artist(self) -> dict | None:
         """Best-effort: return the artist whose page the user is on."""
@@ -1257,6 +1273,4 @@ class UIAgent(ScrollToToolMixin, HighlightToolMixin, BaseUIAgent):
         # ``description`` (for the voice agent's LLM-paraphrase
         # fallback) plus an optional ``speak`` (for verbatim TTS).
         # ``respond_to_task`` handles the task-id lookup + bookkeeping.
-        await self.respond_to_task(
-            {"description": description}, speak=speak, status=status
-        )
+        await self.respond_to_task({"description": description}, speak=speak, status=status)
