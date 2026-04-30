@@ -31,7 +31,6 @@ from pipecat.services.openai.base_llm import OpenAILLMSettings
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat_subagents.agents import (
     UI_STATE_PROMPT_GUIDE,
-    Highlight,
     ScrollTo,
     TaskStatus,
     Toast,
@@ -562,16 +561,15 @@ class UIAgent(BaseUIAgent):
     # ``scroll_to`` and ``highlight`` are silent fire-and-forget: the
     # tool dispatches the UI command, completes the in-flight task
     # with an empty response, and exits. The visual change on the
-    # client (the scroll, the highlight) is the user-facing feedback,
-    # and the voice agent's task unblocks immediately so it can move
-    # on without speaking.
+    # client is the user-facing feedback, and the voice agent's task
+    # unblocks immediately so it can move on without speaking.
     #
-    # The shipped SDK mixins (``ScrollToToolMixin`` /
-    # ``HighlightToolMixin``) are pure side effects that leave the
-    # task open so the LLM can chain another tool in the same turn.
-    # That shape doesn't match this app's prompt — every tool call
-    # here is meant to be the entire turn — so we wire local
-    # silent-terminator versions instead.
+    # The SDK ships a bundled ``ReplyToolMixin`` whose ``reply(answer,
+    # scroll_to, highlight)`` tool requires a spoken answer. That
+    # shape doesn't match this app, where each tool call IS the whole
+    # turn (some speak via ``_respond``, some are silent like the two
+    # below). We override the helper methods on ``UIAgent`` to expose
+    # them as @tool-decorated, silent-terminating LLM tools.
 
     @tool
     async def scroll_to(self, params: FunctionCallParams, ref: str):
@@ -582,7 +580,7 @@ class UIAgent(BaseUIAgent):
                 e.g. ``"e42"``.
         """
         logger.info(f"{self}: scroll_to(ref={ref!r})")
-        await self.send_command("scroll_to", ScrollTo(ref=ref))
+        await super().scroll_to(ref)
         await self.respond_to_task()
         await params.result_callback(None)
 
@@ -595,7 +593,7 @@ class UIAgent(BaseUIAgent):
                 e.g. ``"e42"``.
         """
         logger.info(f"{self}: highlight(ref={ref!r})")
-        await self.send_command("highlight", Highlight(ref=ref))
+        await super().highlight(ref)
         await self.respond_to_task()
         await params.result_callback(None)
 
