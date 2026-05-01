@@ -46,9 +46,14 @@ from pipecat_subagents.agents import (
     tool,
 )
 from pipecat_subagents.agents import UIAgent as BaseUIAgent
-from pipecat_subagents.bus import AgentBus, BusTaskRequestMessage, BusUIEventMessage
+from pipecat_subagents.bus import (
+    AgentBus,
+    BusTaskRequestMessage,
+    BusTaskUpdateMessage,
+    BusUIEventMessage,
+)
 
-Screen = Literal["home", "artist", "detail", "trending"]
+Screen = Literal["home", "artist", "detail", "trending", "discovery"]
 Kind = Literal["album", "song"]
 
 
@@ -121,6 +126,13 @@ anything chart-adjacent.
 - ``go_home()``: Reset to the home grid.
 - ``describe_screen(text)``: Describe the current screen in a single \
 short sentence. Read-only.
+- ``start_discovery(seed_artist)``: Open a Discoveries screen and \
+fan out to three parallel recommenders — similar artists, top of \
+the seed's genre, and the global chart. Tracks stream into the \
+screen as workers find them; the user clicks a card to play. Use \
+when the user asks for music recommendations or "find me something \
+like X". ``seed_artist`` must name an artist the catalog can \
+resolve.
 - ``scroll_to(ref)``: Scroll an element into view by its \
 ``<ui_state>`` ref. Use when the user wants to act on an element \
 tagged ``[offscreen]`` (e.g. "play the last song" when track 18 is \
@@ -171,6 +183,11 @@ class NavFrame:
     item_id: str | None = None
     # Only populated when screen == "trending".
     trending_genre: str | None = None
+    # Only populated when screen == "discovery". The seed artist
+    # the discovery task group fanned out from; the client renders
+    # it in the screen header.
+    discovery_seed_id: str | None = None
+    discovery_seed_name: str | None = None
 
 
 ArtistTab = Literal["albums", "songs", "related"]
@@ -302,6 +319,10 @@ class UIAgent(BaseUIAgent):
     @on_ui_event("play_track")
     async def _on_play_track(self, message: BusUIEventMessage) -> None:
         await self._handle_play_track_click(message.payload or {})
+
+    @on_ui_event("track_click")
+    async def _on_track_click(self, message: BusUIEventMessage) -> None:
+        await self._handle_discovery_track_click(message.payload or {})
 
     # ------------------------------------------------------------------
     # Tools
@@ -613,6 +634,81 @@ class UIAgent(BaseUIAgent):
         await self._respond(f"Described screen: {text}", speak=text)
         await params.result_callback(None)
 
+    @tool
+    async def start_discovery(self, params: FunctionCallParams, seed_artist: str):
+        """Find new music similar to the named seed artist.
+
+        Spawns three worker recommenders in parallel — similar
+        artists, genre chart, global chart — and streams discovered
+        tracks into a Discovery screen as they arrive. The user can
+        click any track to play its preview, or cancel the group.
+
+        Use when the user asks for music recommendations,
+        suggestions, or "play me something like X". The seed must be
+        an artist the catalog can resolve.
+
+        Args:
+            seed_artist: Name of the artist to seed discovery on.
+                The server resolves it via Deezer.
+        """
+        logger.info(f"{self}: start_discovery('{seed_artist}')")
+        artist = await self._catalog_find_artist(seed_artist)
+        if not artist:
+            msg = f"I could not find {seed_artist} to start from."
+            await self._respond(msg, speak=msg)
+            await params.result_callback(None)
+            return
+
+        # Push the Discovery screen so the user has somewhere to
+        # watch tracks stream in.
+        await self._do_navigate_to_discovery(artist)
+
+        # Fire-and-forget the task group. SDK forwards group_started,
+        # task_update, task_completed, group_completed envelopes to
+        # the client; on_task_update (below) intercepts streamed
+        # tracks and emits add_track UI commands.
+        await self.start_user_task_group(
+            "similar_artist",
+            "genre",
+            "chart",
+            payload={
+                "seed": artist["name"],
+                "seed_artist_id": artist["id"],
+            },
+            label=f"Discoveries: {artist['name']}",
+            cancellable=True,
+        )
+
+        msg = f"Looking for music like {artist['name']}."
+        await self._respond(msg, speak=msg)
+        await params.result_callback(None)
+
+    async def on_task_update(self, message: BusTaskUpdateMessage) -> None:
+        """Translate per-track stream updates into ``add_track`` UI commands.
+
+        Discovery workers stream each found track as a
+        ``send_task_update`` with ``data["kind"] == "track"``. The
+        UIAgent base class auto-forwards these as ``task_update``
+        envelopes to the client (for the in-flight panel), and we
+        ALSO emit a custom ``add_track`` command carrying the track
+        payload so the client can render it as a card on the
+        Discovery screen.
+
+        Other update kinds (free-form progress text) flow through
+        unchanged.
+        """
+        await super().on_task_update(message)
+        update = message.update or {}
+        if update.get("kind") != "track":
+            return
+        track = update.get("track") or {}
+        if not track:
+            return
+        await self.send_command(
+            "add_track",
+            {"track": track, "source": message.source},
+        )
+
     # ``scroll_to`` and ``highlight`` are silent fire-and-forget: the
     # tool dispatches the UI command, completes the in-flight task
     # with an empty response, and exits. The visual change on the
@@ -711,6 +807,35 @@ class UIAgent(BaseUIAgent):
     # every client event before the handler runs, so these no longer
     # append ``[click] ...`` prose themselves.
 
+    async def _handle_discovery_track_click(self, data: dict) -> None:
+        """User clicked a card in the Discoveries panel.
+
+        Discovery tracks carry (artist_id, song id) — we resolve the
+        artist's catalog record, find the matching song, and play it.
+        Re-clicking the active track stops playback (parity with the
+        regular ``play_track`` handler).
+        """
+        artist_id = str(data.get("artist_id") or "")
+        track_id = str(data.get("track_id") or "")
+        if not artist_id or not track_id:
+            return
+        artist = await self._catalog_get_artist(artist_id)
+        if not artist:
+            return
+        song = self._find_item_in_artist(artist, "song", track_id)
+        if not song:
+            return
+        # Toggle: re-clicking the active track stops playback.
+        if (
+            self._state.playing is not None
+            and self._state.playing_artist_id == artist["id"]
+            and self._state.playing.get("id") == track_id
+        ):
+            await self.send_command("playback_control", {"action": "stop"})
+            await self._do_stop_playback()
+            return
+        await self._do_play(artist, "song", song)
+
     async def _handle_play_track_click(self, data: dict) -> None:
         artist = await self._catalog_get_artist(data.get("artist_id", ""))
         if not artist:
@@ -801,6 +926,23 @@ class UIAgent(BaseUIAgent):
         self._enter(NavFrame(screen="artist", artist_id=artist["id"]))
         await self._emit_artist(artist)
         return f"Showing {artist['name']}."
+
+    async def _do_navigate_to_discovery(self, seed_artist: dict) -> str:
+        """Push a Discovery screen seeded on the given artist.
+
+        The screen starts empty; the in-flight task group spawned by
+        ``start_discovery`` will stream tracks in via ``add_track``
+        commands as workers find them.
+        """
+        self._enter(
+            NavFrame(
+                screen="discovery",
+                discovery_seed_id=str(seed_artist["id"]),
+                discovery_seed_name=seed_artist["name"],
+            )
+        )
+        await self._emit_discovery(seed_artist)
+        return f"Looking for music like {seed_artist['name']}."
 
     async def _do_select_item(self, artist: dict, kind: Kind, item: dict) -> str:
         top = self._top()
@@ -1244,6 +1386,26 @@ class UIAgent(BaseUIAgent):
             },
         )
 
+    async def _emit_discovery(self, seed_artist: dict) -> None:
+        """Push the Discovery screen for the given seed artist.
+
+        The screen starts empty. Tracks stream in afterwards via
+        ``add_track`` commands emitted from ``on_task_update`` as
+        workers find them.
+        """
+        await self.send_command(
+            "screen",
+            {
+                "screen": "discovery",
+                "seed_artist": {
+                    "id": str(seed_artist.get("id") or ""),
+                    "name": seed_artist.get("name") or "",
+                    "image_url": seed_artist.get("image_url") or "",
+                },
+                "back_enabled": len(self._state.stack) > 1,
+            },
+        )
+
     async def _emit_for_top(self) -> None:
         top = self._top()
         if top.screen == "home":
@@ -1258,6 +1420,19 @@ class UIAgent(BaseUIAgent):
                 item = self._find_item_in_artist(artist, top.kind, top.item_id)
                 if item:
                     await self._emit_detail(artist, top.kind, item)
+        elif top.screen == "discovery":
+            seed = (
+                await self._catalog_get_artist(top.discovery_seed_id or "")
+                if top.discovery_seed_id
+                else None
+            )
+            if seed is None:
+                seed = {
+                    "id": top.discovery_seed_id or "",
+                    "name": top.discovery_seed_name or "",
+                    "image_url": "",
+                }
+            await self._emit_discovery(seed)
         elif top.screen == "trending":
             # Re-fetch trending on reconnect; charts change fast enough
             # that the previous list is stale.

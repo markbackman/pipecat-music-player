@@ -69,6 +69,11 @@ from pipecat_subagents.runner import AgentRunner
 from pipecat_subagents.types import AgentReadyData
 
 from catalog_agent import CatalogAgent
+from discovery_workers import (
+    ChartRecommender,
+    GenreRecommender,
+    SimilarArtistRecommender,
+)
 from ui_agent import UIAgent
 from voice_agent import VoiceAgent
 
@@ -98,6 +103,17 @@ class MusicAgent(BaseAgent):
             ui = UIAgent("ui", bus=self.bus)
             await self.add_agent(voice)
             await self.add_agent(ui)
+            # Discovery workers — short-lived helpers added alongside
+            # the UI agent. The UI agent's ``start_discovery`` tool
+            # dispatches a ``user_task_group`` against these names;
+            # each worker pulls candidate artists from a different
+            # angle and streams tracks back via task updates.
+            for cls in (
+                SimilarArtistRecommender,
+                GenreRecommender,
+                ChartRecommender,
+            ):
+                await self.add_agent(cls(cls.source, bus=self.bus))
 
     @agent_ready(name="voice")
     async def on_voice_ready(self, data: AgentReadyData) -> None:
