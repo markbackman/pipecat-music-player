@@ -1,6 +1,10 @@
 import { useEffect, useRef } from "react";
 import type { PipecatBaseChildProps } from "@pipecat-ai/voice-ui-kit";
-import { UIAgentProvider, useA11ySnapshot } from "@pipecat-ai/client-react";
+import {
+  UIAgentProvider,
+  UITasksProvider,
+  useA11ySnapshot,
+} from "@pipecat-ai/client-react";
 import { useServerMessages } from "./hooks/useServerMessages";
 import { useClickSender } from "./hooks/useClickSender";
 import { Header } from "./components/Header";
@@ -9,6 +13,7 @@ import { Welcome } from "./screens/Welcome";
 import { Home } from "./screens/Home";
 import { Artist } from "./screens/Artist";
 import { Detail } from "./screens/Detail";
+import { Discovery } from "./screens/Discovery";
 import { Trending } from "./screens/Trending";
 import type { Screen } from "./types";
 
@@ -22,19 +27,24 @@ function screenIdentity(s: Screen): string {
       return `detail:${s.item.id}`;
     case "trending":
       return `trending:${s.genre ?? ""}`;
+    case "discovery":
+      return `discovery:${s.seedArtist.id}`;
   }
 }
 
 export function App(props: PipecatBaseChildProps) {
   return (
     <UIAgentProvider client={props.client ?? undefined}>
-      <AppInner {...props} />
+      <UITasksProvider>
+        <AppInner {...props} />
+      </UITasksProvider>
     </UIAgentProvider>
   );
 }
 
 function AppInner({ handleConnect, handleDisconnect }: PipecatBaseChildProps) {
-  const { screen, toast, nowPlaying, closeToast } = useServerMessages();
+  const { screen, toast, nowPlaying, discoveryTracks, closeToast } =
+    useServerMessages();
   const sendClick = useClickSender();
   const mainRef = useRef<HTMLElement>(null);
   const lastScreenId = useRef<string | null>(null);
@@ -73,7 +83,8 @@ function AppInner({ handleConnect, handleDisconnect }: PipecatBaseChildProps) {
   const backEnabled =
     (screen.kind === "artist" ||
       screen.kind === "detail" ||
-      screen.kind === "trending") &&
+      screen.kind === "trending" ||
+      screen.kind === "discovery") &&
     screen.backEnabled;
 
   return (
@@ -157,6 +168,19 @@ function AppInner({ handleConnect, handleDisconnect }: PipecatBaseChildProps) {
                 kind: "nav",
                 view: "artist",
                 artist_id: a.id,
+              })
+            }
+          />
+        )}
+        {screen.kind === "discovery" && (
+          <Discovery
+            seedArtist={screen.seedArtist}
+            tracks={discoveryTracks}
+            onPlayTrack={(track) =>
+              sendClick({
+                kind: "track_click",
+                artist_id: track.artist_id,
+                track_id: track.id,
               })
             }
           />

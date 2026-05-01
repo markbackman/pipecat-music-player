@@ -251,6 +251,216 @@ body,
   text-align: center;
 }
 
+/* ---------- Discovery screen ---------- */
+
+.discovery-screen {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.discovery-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.discovery-seed-image {
+  width: 88px;
+  height: 88px;
+  object-fit: cover;
+  border-radius: 12px;
+}
+
+.discovery-eyebrow {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #9a9aa8;
+  margin-bottom: 4px;
+}
+
+.discovery-inflight {
+  background: #14141e;
+  border: 1px dashed #3b6ee0;
+  border-radius: 10px;
+  padding: 12px 16px;
+}
+
+.discovery-inflight-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.discovery-inflight-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: #d6d6e0;
+}
+
+.discovery-cancel {
+  background: transparent;
+  border: 1px solid #2a2a3a;
+  color: #9a9aa8;
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.discovery-cancel:hover {
+  background: #1a1a28;
+  color: #e0e0ea;
+}
+
+.discovery-workers {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.discovery-worker {
+  display: grid;
+  grid-template-columns: 140px 1fr auto;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.discovery-worker-name {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  color: #c8c8d4;
+}
+
+.discovery-worker-update {
+  color: #9a9aa8;
+  font-style: italic;
+}
+
+.discovery-worker-status {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 600;
+}
+
+.discovery-worker-status[data-status="running"] {
+  color: #6b9eff;
+}
+
+.discovery-worker-status[data-status="completed"] {
+  color: #4caf50;
+}
+
+.discovery-worker-status[data-status="cancelled"] {
+  color: #9a9aa8;
+}
+
+.discovery-worker-status[data-status="error"],
+.discovery-worker-status[data-status="failed"] {
+  color: #e57373;
+}
+
+.discovery-tracks-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.discovery-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.discovery-card {
+  background: #14141e;
+  border: 1px solid #24243a;
+  border-radius: 10px;
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  color: inherit;
+  transition:
+    border-color 0.15s,
+    transform 0.15s;
+}
+
+.discovery-card:hover {
+  border-color: #3b6ee0;
+  transform: translateY(-1px);
+}
+
+.discovery-cover {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  object-fit: cover;
+}
+
+.discovery-card-body {
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.discovery-card-title {
+  font-weight: 600;
+  font-size: 13px;
+  color: #e0e0ea;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.discovery-card-artist {
+  font-size: 12px;
+  color: #9a9aa8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.discovery-card-source {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 600;
+  color: #6b9eff;
+  margin-top: 4px;
+}
+
+.discovery-card-source[data-source="similar_artist"] {
+  color: #6b9eff;
+}
+
+.discovery-card-source[data-source="genre"] {
+  color: #b06bff;
+}
+
+.discovery-card-source[data-source="chart"] {
+  color: #ffb86b;
+}
+
+.discovery-empty {
+  padding: 24px;
+  border: 1px dashed #2a2a3a;
+  border-radius: 10px;
+  background: #14141e;
+  color: #9a9aa8;
+  font-size: 14px;
+  line-height: 1.4;
+  text-align: center;
+}
+
 /* ---------- Artist tabs ---------- */
 
 .tab-bar {

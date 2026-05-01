@@ -12,6 +12,7 @@ import type {
   Album,
   Artist,
   ArtistTab,
+  DiscoveryTrack,
   Favorite,
   MinimalArtist,
   NewRelease,
@@ -62,7 +63,27 @@ type ScreenPayload =
       genre: string | null;
       artists: MinimalArtist[];
       back_enabled: boolean;
+    }
+  | {
+      screen: "discovery";
+      seed_artist: MinimalArtist;
+      back_enabled: boolean;
     };
+
+interface AddTrackPayload {
+  source: string;
+  track: {
+    id: string;
+    title: string;
+    artist_id: string;
+    artist_name: string;
+    album_id: string;
+    album_title: string;
+    preview_url?: string;
+    cover_url?: string;
+    duration_seconds?: number;
+  };
+}
 
 interface PlaybackPayload {
   state: "playing" | "stopped";
@@ -88,6 +109,14 @@ export function useServerMessages() {
     id: string;
     title: string;
   } | null>(null);
+  // Discovery tracks accumulate from ``add_track`` custom commands
+  // that fire as worker recommenders stream results back. They live
+  // here (not on the screen state) because the server's screen-push
+  // command resets the screen object on every navigation; we want
+  // tracks to persist for the duration of one discovery session and
+  // clear when a new discovery starts (signaled by a fresh
+  // ``screen=discovery`` command).
+  const [discoveryTracks, setDiscoveryTracks] = useState<DiscoveryTrack[]>([]);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
     undefined,
   );
@@ -112,6 +141,7 @@ export function useServerMessages() {
     setFavorites([]);
     setToast(null);
     setNowPlaying(null);
+    setDiscoveryTracks([]);
   }, [player]);
 
   const showToast = useCallback((t: Toast, followsBot: boolean) => {
@@ -148,6 +178,16 @@ export function useServerMessages() {
           label: msg.label,
           genre: msg.genre,
           artists: msg.artists,
+          backEnabled: msg.back_enabled,
+        });
+      } else if (msg.screen === "discovery") {
+        // New discovery session: clear any tracks left from a prior
+        // discovery so the panel starts empty and fills as workers
+        // stream their results.
+        setDiscoveryTracks([]);
+        setScreen({
+          kind: "discovery",
+          seedArtist: msg.seed_artist,
           backEnabled: msg.back_enabled,
         });
       } else {
@@ -218,6 +258,31 @@ export function useServerMessages() {
     ),
   );
 
+  useUICommandHandler<AddTrackPayload>(
+    "add_track",
+    useCallback((msg) => {
+      if (!msg?.track?.id) return;
+      const track: DiscoveryTrack = {
+        id: msg.track.id,
+        title: msg.track.title,
+        artist_id: msg.track.artist_id,
+        artist_name: msg.track.artist_name,
+        album_id: msg.track.album_id,
+        album_title: msg.track.album_title,
+        preview_url: msg.track.preview_url,
+        cover_url: msg.track.cover_url,
+        duration_seconds: msg.track.duration_seconds,
+        source: msg.source,
+      };
+      setDiscoveryTracks((prev) => {
+        // Dedupe by id — workers can occasionally surface the same
+        // track from different angles.
+        if (prev.some((t) => t.id === track.id)) return prev;
+        return [...prev, track];
+      });
+    }, []),
+  );
+
   useUICommandHandler<FavoriteAddedPayload>(
     "favorite_added",
     useCallback(
@@ -269,5 +334,13 @@ export function useServerMessages() {
     setToast(null);
   });
 
-  return { screen, favorites, toast, nowPlaying, closeToast, reset };
+  return {
+    screen,
+    favorites,
+    toast,
+    nowPlaying,
+    discoveryTracks,
+    closeToast,
+    reset,
+  };
 }

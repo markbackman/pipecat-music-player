@@ -66,6 +66,23 @@ export interface NewRelease {
 
 export type ArtistTab = "albums" | "songs" | "related";
 
+export interface DiscoveryTrack {
+  id: string;
+  title: string;
+  artist_id: string;
+  artist_name: string;
+  album_id: string;
+  album_title: string;
+  preview_url?: string;
+  cover_url?: string;
+  duration_seconds?: number;
+  /**
+   * Worker that surfaced this track: ``"similar_artist"``, ``"genre"``,
+   * or ``"chart"``. The Discovery screen uses this to label cards.
+   */
+  source: string;
+}
+
 export type Screen =
   | {
       kind: "home";
@@ -94,6 +111,11 @@ export type Screen =
       label: string;
       genre: string | null;
       artists: MinimalArtist[];
+      backEnabled: boolean;
+    }
+  | {
+      kind: "discovery";
+      seedArtist: MinimalArtist;
       backEnabled: boolean;
     };
 
@@ -130,5 +152,10 @@ export type ClickEvent =
       kind: "play_track";
       artist_id: string;
       album_id: string;
+      track_id: string;
+    }
+  | {
+      kind: "track_click";
+      artist_id: string;
       track_id: string;
     };
