@@ -1,6 +1,6 @@
 """LLM-powered description and Q&A generation, grounded by Deezer metadata.
 
-One call to ``gpt-4o-mini`` per request. The prompts instruct the model
+One call to ``gpt-4.1`` per request. The prompts instruct the model
 to output ``NONE`` when it isn't confident, which we translate to an
 empty string. Callers cache as they see fit.
 """
@@ -10,7 +10,7 @@ import os
 from loguru import logger
 from openai import AsyncOpenAI
 
-_MODEL = "gpt-4o-mini"
+_MODEL = "gpt-4.1"
 
 _PROMPT = """You're writing a description for a voice-driven music player app. The text will be both displayed on screen and spoken aloud by a text-to-speech engine.
 
@@ -83,5 +83,3 @@ async def generate_description(
     if not text or text.upper() == "NONE":
         return ""
     return text
-
-
