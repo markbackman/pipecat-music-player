@@ -2,7 +2,7 @@
 
 A voice-driven music browsing app built on [Pipecat](https://github.com/pipecat-ai/pipecat) and [Pipecat Subagents](https://github.com/markbackman/pipecat-subagents). Demonstrates two patterns:
 
-- **Voice / UI separation-of-concerns**: a voice agent handles the spoken conversation, a UI agent owns the screen state, a catalog agent owns the data.
+- **Voice/UI separation-of-concerns**: a voice agent handles the spoken conversation, a UI agent owns the screen state, a catalog agent owns the data.
 - **Parallel fan-out with streaming results**: "show me artists like Radiohead" dispatches to three worker agents that pull candidates from different similarity angles in parallel and stream tracks back into a Discovery screen as they find them.
 
 Talk to browse trending artists, play 30-second previews, favorite songs, ask conversational questions about the catalog, get recommendations, and more.
@@ -16,7 +16,7 @@ MusicAgent (transport + BusBridge + UI bridge)
   ├── VoiceAgent (LLM, bridged)
   │     └── @tool handle_request(query)
   │           └── request_task("ui")
-  ├── UIAgent (LLM, not bridged)
+  ├── UIAgent (LLM, non-bridged)
   │     ├── tools: navigate_to_artist, select_item, play, control_playback,
   │     │          show_info, answer, add_to_favorites, show_albums,
   │     │          show_songs, show_similar_artists, show_trending,
