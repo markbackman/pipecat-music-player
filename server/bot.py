@@ -70,9 +70,9 @@ from pipecat_subagents.types import AgentReadyData
 
 from catalog_agent import CatalogAgent
 from discovery_workers import (
-    ChartRecommender,
     GenreRecommender,
     SimilarArtistRecommender,
+    TwoHopRecommender,
 )
 from ui_agent import UIAgent
 from voice_agent import VoiceAgent
@@ -111,7 +111,7 @@ class MusicAgent(BaseAgent):
             for cls in (
                 SimilarArtistRecommender,
                 GenreRecommender,
-                ChartRecommender,
+                TwoHopRecommender,
             ):
                 await self.add_agent(cls(cls.source, bus=self.bus))
 

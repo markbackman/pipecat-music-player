@@ -75,24 +75,12 @@ class CatalogAgent(BaseAgent):
         self._home_artists = [self._minimal_artist(h) for h in hits]
         logger.info(f"{self}: {len(self._home_artists)} home artists ready")
         self._home_ready.set()
-        # Pre-synthesize the full artist dicts (albums + songs) for every
-        # home cell in the background so a click on Home is responsive.
-        # ``_fetch_artist_by_id`` also kicks off per-artist short
-        # description warming once the dict is built.
-        if self._home_artists:
-            self.create_asyncio_task(self._warm_home_full_artists(), "catalog_warm_home_full")
-
-    async def _warm_home_full_artists(self) -> None:
-        sem = asyncio.Semaphore(WARM_CONCURRENCY)
-
-        async def bounded(artist_id: str) -> None:
-            async with sem:
-                await self._fetch_artist_by_id(artist_id)
-
-        await asyncio.gather(
-            *(bounded(a["id"]) for a in self._home_artists), return_exceptions=True
-        )
-        logger.info(f"{self}: home artist full dicts warmed")
+        # Full artist dicts (releases, songs, descriptions) are built
+        # lazily when a user clicks a home cell. Pre-warming all 16
+        # at startup made discovery and other interactive queries
+        # contend with ~80-160 background Deezer calls for a shared
+        # rate-limit budget; the cold-click latency is a better
+        # tradeoff than the user staring at a stalled discovery.
 
     async def _warm_artist_short_descriptions(self, artist_id: str) -> None:
         """Backfill short descriptions for a newly-discovered artist.
@@ -295,10 +283,15 @@ class CatalogAgent(BaseAgent):
                 )
                 seen_titles.add(norm)
 
+        # Genre comes from the modal ``genre_id`` across the artist's
+        # releases, which we already fetched. Deezer's top-tracks
+        # endpoint strips the album genre, so it can't be used here.
+        genre_label = await self._derive_artist_genre(releases)
+
         return {
             "id": artist_id,
             "name": deezer_artist.get("name") or "",
-            "genre": "",
+            "genre": genre_label,
             "image_url": deezer_artist.get("picture_xl") or deezer_artist.get("picture_big") or "",
             "short_description": None,
             "long_description": None,
@@ -480,6 +473,32 @@ class CatalogAgent(BaseAgent):
 
     def _label_for_genre_id(self, gid: int) -> str | None:
         return self._genre_label_by_id.get(gid)
+
+    async def _derive_artist_genre(self, releases: list[dict]) -> str:
+        """Modal genre across the artist's releases.
+
+        Deezer's artist endpoint doesn't expose a primary genre, but
+        each release in ``/artist/{id}/albums`` carries ``genre_id``.
+        We vote across them and pick the most common, mapping to a
+        label via the genres dictionary. Returns an empty string
+        when no genre_id resolves.
+        """
+        if not releases:
+            return ""
+        counts: dict[int, int] = {}
+        for r in releases:
+            try:
+                gid = int(r.get("genre_id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if gid <= 0:
+                continue
+            counts[gid] = counts.get(gid, 0) + 1
+        if not counts:
+            return ""
+        await self._ensure_genres()
+        top_gid = max(counts.items(), key=lambda x: x[1])[0]
+        return self._label_for_genre_id(top_gid) or ""
 
     async def _trending(self, genre: str | None, limit: int = 12) -> dict:
         await self._ensure_genres()

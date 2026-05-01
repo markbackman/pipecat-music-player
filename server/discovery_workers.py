@@ -1,18 +1,27 @@
 """Discovery workers: parallel music recommenders that stream tracks.
 
 The UI agent kicks off ``user_task_group("similar_artist", "genre",
-"chart")`` when the user asks for music recommendations. Each worker
-here pulls candidate artists from a different angle, then fetches
-their top tracks via the long-lived ``CatalogAgent`` and streams
-each track back as a ``send_task_update`` of kind ``"track"``. The UI
-agent's ``on_task_update`` interception turns each one into an
-``add_track`` UI command, so tracks appear in the Discoveries
-screen as workers find them.
+"two_hop")`` when the user asks for music recommendations. All three
+workers answer the same question, "what is similar to the seed?",
+from different angles:
 
-Workers don't talk to Deezer directly — every catalog lookup goes
+- ``similar_artist``: Deezer's direct related-artists for the seed.
+- ``genre``: top artists in the seed's genre (or modal genre across
+  the seed's relateds when the seed record has no genre populated).
+- ``two_hop``: the broader neighborhood, by expanding each direct
+  related artist's own related set and ranking grandchildren by how
+  often they recur across the first hop.
+
+Each worker fetches its candidates' top tracks via the long-lived
+``CatalogAgent`` and streams them back as ``send_task_update`` calls
+of kind ``"track"``. The UI agent's ``on_task_update`` interception
+turns each one into an ``add_track`` UI command, so tracks appear in
+the Discoveries screen as workers find them.
+
+Workers don't talk to Deezer directly. Every catalog lookup goes
 through ``CatalogAgent``, the same data layer the rest of the app
-uses. That keeps caching, rate-limiting, and the description
-generator centralized.
+uses, so caching, rate-limiting, and the description generator stay
+centralized.
 """
 
 from __future__ import annotations
@@ -25,17 +34,18 @@ from pipecat.processors.filters.identity_filter import IdentityFilter
 from pipecat_subagents.agents import BaseAgent, TaskError
 from pipecat_subagents.bus import AgentBus, BusTaskRequestMessage
 
-
 # How many candidate artists each worker pulls before fetching tracks.
 CANDIDATES_PER_WORKER = 5
 
-# How many tracks per candidate artist to stream back. Two keeps the
-# panel readable while still surfacing variety per source.
-TRACKS_PER_ARTIST = 2
+# How many tracks per candidate artist to stream back. Three balances
+# variety per artist against keeping the screen scannable.
+TRACKS_PER_ARTIST = 3
 
 # Per-catalog-call timeout. Catalog calls hit Deezer and warm caches
-# on first touch; give them room.
-CATALOG_TIMEOUT = 8.0
+# on first touch; give them room. Tuned to absorb the in-flight
+# semaphore queueing in ``deezer.get_json`` plus the once-per-call
+# 3s 429 retry sleep without timing out on a legitimate cold cascade.
+CATALOG_TIMEOUT = 15.0
 
 
 def _track_to_payload(artist: dict, track: dict) -> dict:
@@ -52,11 +62,7 @@ def _track_to_payload(artist: dict, track: dict) -> dict:
         "album_id": str(track.get("album_id") or ""),
         "album_title": track.get("album_title") or "",
         "preview_url": track.get("preview_url") or "",
-        "cover_url": (
-            track.get("cover_url")
-            or artist.get("image_url")
-            or ""
-        ),
+        "cover_url": (track.get("cover_url") or artist.get("image_url") or ""),
         "duration_seconds": int(track.get("duration_seconds") or 0),
     }
 
@@ -92,16 +98,12 @@ class _DiscoveryWorker(BaseAgent):
             seed_artist_id = str(seed_artist_id)
 
         try:
-            await self.send_task_update(
-                task_id, {"text": f"finding candidates for {self.source}"}
-            )
+            await self.send_task_update(task_id, {"text": f"finding candidates for {self.source}"})
 
             candidates = await self.find_candidate_artists(seed, seed_artist_id)
 
             if not candidates:
-                await self.send_task_update(
-                    task_id, {"text": "no candidates found"}
-                )
+                await self.send_task_update(task_id, {"text": "no candidates found"})
                 await self.send_task_response(task_id, response={"count": 0})
                 return
 
@@ -143,9 +145,7 @@ class _DiscoveryWorker(BaseAgent):
             raise
         except Exception as exc:
             logger.exception(f"{self}: discovery failed")
-            await self.send_task_response(
-                task_id, response={"error": str(exc), "count": 0}
-            )
+            await self.send_task_response(task_id, response={"error": str(exc), "count": 0})
 
     async def _catalog(self, action: str, **payload) -> dict:
         """Helper: dispatch a single catalog task and return its response."""
@@ -191,33 +191,31 @@ class SimilarArtistRecommender(_DiscoveryWorker):
 
 
 class GenreRecommender(_DiscoveryWorker):
-    """Pull tracks from top artists in the seed artist's genre."""
+    """Pull tracks from top artists in the seed artist's genre.
+
+    Resolves the genre from the seed's own record first, then falls
+    back to the modal genre across the seed's related-artist set
+    when the seed record doesn't carry one. If neither yields a
+    genre, the worker emits no candidates and completes cleanly.
+    """
 
     source = "genre"
 
     async def find_candidate_artists(
         self, seed: str, seed_artist_id: str | None
     ) -> list[tuple[str, str]]:
-        # The seed artist may carry a genre; otherwise fall back to
-        # the seed string itself as a genre name.
-        genre = ""
-        if seed_artist_id:
-            artist = await self._fetch_artist(seed_artist_id)
-            genre = (artist or {}).get("genre") or ""
-        if not genre and seed:
-            # Heuristic: if the user said "show me workout music",
-            # the seed itself might be the genre. Catalog accepts
-            # arbitrary names and tries to resolve them.
-            genre = seed
+        if not seed_artist_id:
+            return []
 
+        seed_artist = await self._fetch_artist(seed_artist_id)
+        genre = (seed_artist or {}).get("genre") or ""
+        if not genre:
+            genre = await self._derive_genre_from_related(seed_artist_id)
         if not genre:
             return []
 
-        result = await self._catalog(
-            "get_trending", genre=genre, limit=CANDIDATES_PER_WORKER
-        )
+        result = await self._catalog("get_trending", genre=genre, limit=CANDIDATES_PER_WORKER + 2)
         artists = result.get("artists") or []
-        # Skip the seed artist itself if it shows up in the genre chart.
         candidates: list[tuple[str, str]] = []
         for a in artists:
             aid = str(a.get("id") or "")
@@ -228,25 +226,112 @@ class GenreRecommender(_DiscoveryWorker):
                 break
         return candidates
 
+    async def _derive_genre_from_related(self, seed_artist_id: str) -> str:
+        """Modal genre across the seed's related-artist set.
 
-class ChartRecommender(_DiscoveryWorker):
-    """Pull tracks from the global Deezer chart."""
+        Used when the seed's own record has no genre populated. Pulls
+        a small related set, fetches each as a full artist record (so
+        ``genre`` is filled), and returns the most common genre. Ties
+        break by encounter order, which matches Deezer's relevance
+        ranking of the related list.
+        """
+        related = await self._catalog("related_artists", artist_id=seed_artist_id, limit=5)
+        related_artists = related.get("artists") or []
+        if not related_artists:
+            return ""
+        results = await asyncio.gather(
+            *[self._fetch_artist(str(a.get("id") or "")) for a in related_artists if a.get("id")],
+            return_exceptions=True,
+        )
+        counts: dict[str, int] = {}
+        for r in results:
+            if isinstance(r, asyncio.CancelledError):
+                raise r
+            if isinstance(r, Exception) or not r:
+                continue
+            g = (r.get("genre") or "").strip()
+            if not g:
+                continue
+            counts[g] = counts.get(g, 0) + 1
+        if not counts:
+            return ""
+        return max(counts.items(), key=lambda x: x[1])[0]
 
-    source = "chart"
+
+class TwoHopRecommender(_DiscoveryWorker):
+    """Pull tracks from the seed's broader neighborhood.
+
+    Expands each of the seed's top direct-related artists to their
+    own related-artist set, then ranks the union of those grand-
+    children by how often they recur across the first hop. Surfaces
+    artists that sit in the same musical space but don't show up in
+    Deezer's direct related list for the seed.
+    """
+
+    source = "two_hop"
+
+    # First-hop fan-out: how many direct relateds we expand. Each
+    # expansion is a catalog round trip, so balance breadth against
+    # latency.
+    FIRST_HOP_LIMIT = 3
+
+    # Second-hop limit per first-hop artist. Keep modest; the union
+    # gets large fast.
+    SECOND_HOP_LIMIT = 5
 
     async def find_candidate_artists(
         self, seed: str, seed_artist_id: str | None
     ) -> list[tuple[str, str]]:
-        result = await self._catalog(
-            "get_trending", genre=None, limit=CANDIDATES_PER_WORKER + 2
+        if not seed_artist_id:
+            return []
+
+        first_hop = await self._catalog(
+            "related_artists",
+            artist_id=seed_artist_id,
+            limit=self.FIRST_HOP_LIMIT,
         )
-        artists = result.get("artists") or []
-        candidates: list[tuple[str, str]] = []
-        for a in artists:
-            aid = str(a.get("id") or "")
-            if not aid or aid == seed_artist_id:
+        first_hop_artists = first_hop.get("artists") or []
+        if not first_hop_artists:
+            return []
+
+        first_hop_ids = {str(a.get("id") or "") for a in first_hop_artists if a.get("id")}
+        first_hop_ids.discard("")
+
+        results = await asyncio.gather(
+            *[
+                self._catalog(
+                    "related_artists",
+                    artist_id=str(a.get("id") or ""),
+                    limit=self.SECOND_HOP_LIMIT,
+                )
+                for a in first_hop_artists
+                if a.get("id")
+            ],
+            return_exceptions=True,
+        )
+
+        # Score by recurrence: an artist showing up across multiple
+        # first-hops sits closer to the center of the neighborhood.
+        # Track which first-hop artist surfaced each grandchild so
+        # the streaming hint can credit the path.
+        scores: dict[str, int] = {}
+        via: dict[str, str] = {}
+        for first_artist, result in zip(first_hop_artists, results):
+            if isinstance(result, asyncio.CancelledError):
+                raise result
+            if isinstance(result, Exception):
                 continue
-            candidates.append((aid, "chart"))
-            if len(candidates) >= CANDIDATES_PER_WORKER:
-                break
-        return candidates
+            for a in result.get("artists") or []:
+                aid = str(a.get("id") or "")
+                if not aid:
+                    continue
+                if aid == seed_artist_id or aid in first_hop_ids:
+                    continue
+                scores[aid] = scores.get(aid, 0) + 1
+                via.setdefault(aid, first_artist.get("name") or "")
+
+        if not scores:
+            return []
+
+        ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        return [(aid, f"via {via[aid]}") for aid, _ in ranked[:CANDIDATES_PER_WORKER]]

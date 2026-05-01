@@ -8,12 +8,12 @@ interface DiscoveryProps {
   onPlayTrack: (track: DiscoveryTrack) => void;
 }
 
-const COLUMNS = 4;
+const COLUMNS = 8;
 
 const SOURCE_LABELS: Record<string, string> = {
   similar_artist: "Similar artists",
-  genre: "Genre chart",
-  chart: "Global chart",
+  genre: "Genre peers",
+  two_hop: "More like these",
 };
 
 function sourceLabel(source: string): string {

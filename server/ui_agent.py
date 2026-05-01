@@ -116,8 +116,10 @@ Only valid on an Artist screen. Use for "show songs", "see the \
 tracks", "go to songs".
 - ``show_similar_artists()``: Switch the current Artist page to its \
 Related Artists tab (fetches on demand). Only valid on an Artist \
-screen. Use for "who's similar", "show me artists like them", "more \
-like this", "show related".
+screen, and only when the user is asking about the artist already \
+on screen with no other artist named ("who's similar", "more like \
+them", "show related"). If the user names a specific seed artist, \
+use ``start_discovery`` instead.
 - ``show_trending(genre)``: Push a Trending screen. ``genre`` is an \
 optional string like "rock", "pop", "hip-hop"; omit for the global \
 chart. Use for "what's trending", "what's popular in rock", or \
@@ -127,12 +129,14 @@ anything chart-adjacent.
 - ``describe_screen(text)``: Describe the current screen in a single \
 short sentence. Read-only.
 - ``start_discovery(seed_artist)``: Open a Discoveries screen and \
-fan out to three parallel recommenders — similar artists, top of \
-the seed's genre, and the global chart. Tracks stream into the \
-screen as workers find them; the user clicks a card to play. Use \
-when the user asks for music recommendations or "find me something \
-like X". ``seed_artist`` must name an artist the catalog can \
-resolve.
+fan out to three parallel recommenders, all scoped to similarity \
+with the seed. Tracks stream into the screen as workers find them; \
+the user clicks a card to play. Use whenever the user names a seed \
+artist and wants similar music, recommendations, or new artists to \
+explore. Triggers include "find me music like X", "discover artists \
+like X", "show me artists similar to X", "play me something like \
+X", "recommend music like X", "more like X". ``seed_artist`` must \
+be the artist the user named.
 - ``scroll_to(ref)``: Scroll an element into view by its \
 ``<ui_state>`` ref. Use when the user wants to act on an element \
 tagged ``[offscreen]`` (e.g. "play the last song" when track 18 is \
@@ -160,6 +164,14 @@ artist without a specific title.
 to switch the Artist page tab when the user asks for one of those \
 categories in the abstract ("show me the albums", "who's similar"). \
 Use ``show_trending`` for popularity / chart questions.
+6. Disambiguate "similar / like / discover" requests by whether the \
+user named a seed artist. Named seed ("similar to Radiohead", \
+"discover artists like Nirvana", "music like X") → \
+``start_discovery``. No named seed, asking about the current artist \
+("who's similar", "more like them") → ``show_similar_artists`` \
+(only valid on an Artist screen). Never call ``navigate_to_artist`` \
+as a stepping stone toward similar artists; ``start_discovery`` \
+resolves the seed itself.
 6. Use ``describe_screen`` only for meta questions about the \
 current screen ("where am I", "what is this page"). Use \
 ``show_info`` for "tell me about X" on a specific named item. Use \
@@ -638,30 +650,57 @@ class UIAgent(BaseUIAgent):
     async def start_discovery(self, params: FunctionCallParams, seed_artist: str):
         """Find new music similar to the named seed artist.
 
-        Spawns three worker recommenders in parallel — similar
-        artists, genre chart, global chart — and streams discovered
-        tracks into a Discovery screen as they arrive. The user can
-        click any track to play its preview, or cancel the group.
+        Opens a Discovery screen and fans out to three parallel
+        recommenders, all scoped to similarity with the seed: direct
+        similar artists, peers in the seed's genre, and the broader
+        neighborhood (artists similar to the seed's similar). Tracks
+        stream into the screen as workers find them; the user can
+        click any card to play, or cancel the search.
 
-        Use when the user asks for music recommendations,
-        suggestions, or "play me something like X". The seed must be
-        an artist the catalog can resolve.
+        Use when the user asks for music recommendations or "play me
+        something like X". The seed must be an artist the catalog
+        can resolve.
 
         Args:
             seed_artist: Name of the artist to seed discovery on.
                 The server resolves it via Deezer.
         """
         logger.info(f"{self}: start_discovery('{seed_artist}')")
+
+        # Cold-catalog seed lookups can take several seconds when
+        # home warm-up is competing for Deezer slots. Push a
+        # placeholder Discovery screen and speak the ack first so
+        # the user gets visual + audio feedback right away; resolve
+        # the seed and fire the workers afterward.
+        placeholder = {"id": "", "name": seed_artist, "image_url": ""}
+        await self._do_navigate_to_discovery(placeholder)
+        msg = f"Looking for music like {seed_artist}."
+        await self._respond(msg, speak=msg)
+        await params.result_callback(None)
+
         artist = await self._catalog_find_artist(seed_artist)
         if not artist:
-            msg = f"I could not find {seed_artist} to start from."
-            await self._respond(msg, speak=msg)
-            await params.result_callback(None)
+            await self.send_command(
+                "toast",
+                Toast(
+                    title="Couldn't find that artist",
+                    subtitle="Discovery",
+                    image_url="",
+                    description=f"No catalog match for {seed_artist}.",
+                ),
+            )
+            # Pop the placeholder screen so the user isn't stuck on
+            # an empty Discovery view.
+            await self._do_go_back()
             return
 
-        # Push the Discovery screen so the user has somewhere to
-        # watch tracks stream in.
-        await self._do_navigate_to_discovery(artist)
+        # Update the nav frame to the canonical record and re-emit
+        # so the header picks up the real image + spelling.
+        top = self._top()
+        if top.screen == "discovery":
+            top.discovery_seed_id = str(artist["id"])
+            top.discovery_seed_name = artist["name"]
+        await self._emit_discovery(artist)
 
         # Fire-and-forget the task group. SDK forwards group_started,
         # task_update, task_completed, group_completed envelopes to
@@ -670,7 +709,7 @@ class UIAgent(BaseUIAgent):
         await self.start_user_task_group(
             "similar_artist",
             "genre",
-            "chart",
+            "two_hop",
             payload={
                 "seed": artist["name"],
                 "seed_artist_id": artist["id"],
@@ -678,10 +717,6 @@ class UIAgent(BaseUIAgent):
             label=f"Discoveries: {artist['name']}",
             cancellable=True,
         )
-
-        msg = f"Looking for music like {artist['name']}."
-        await self._respond(msg, speak=msg)
-        await params.result_callback(None)
 
     async def on_task_update(self, message: BusTaskUpdateMessage) -> None:
         """Translate per-track stream updates into ``add_track`` UI commands.

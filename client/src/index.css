@@ -446,7 +446,7 @@ body,
   color: #b06bff;
 }
 
-.discovery-card-source[data-source="chart"] {
+.discovery-card-source[data-source="two_hop"] {
   color: #ffb86b;
 }
 
