@@ -26,9 +26,17 @@ from typing import Literal
 
 from loguru import logger
 from pipecat.frames.frames import LLMMessagesAppendFrame
+from pipecat.processors.aggregators.llm_context_summarizer import SummaryAppliedEvent
+from pipecat.processors.aggregators.llm_response_universal import (
+    LLMAssistantAggregatorParams,
+)
 from pipecat.services.llm_service import FunctionCallParams, LLMService
 from pipecat.services.openai.base_llm import OpenAILLMSettings
 from pipecat.services.openai.llm import OpenAILLMService
+from pipecat.utils.context.llm_context_summarization import (
+    LLMAutoContextSummarizationConfig,
+    LLMContextSummaryConfig,
+)
 from pipecat_subagents.agents import (
     UI_STATE_PROMPT_GUIDE,
     ScrollTo,
@@ -193,7 +201,40 @@ class UIAgent(BaseUIAgent):
     """Owns UI state and routes voice requests / client clicks to UI actions."""
 
     def __init__(self, name: str, *, bus: AgentBus):
-        super().__init__(name, bus=bus, active=True)
+        # Music browsing is naturally multi-turn ("show me Nirvana"
+        # → "play their best album" → "skip that one"). With
+        # ``keep_history=True`` the LLM accumulates conversation
+        # history across turns so deictic references like "that" /
+        # "it" / "the first one" resolve against prior exchanges.
+        #
+        # ``enable_auto_context_summarization=True`` on the assistant
+        # aggregator keeps the context bounded over long sessions:
+        # when the configured thresholds (default 8000 tokens / 20
+        # unsummarized messages) are reached, the LLM service
+        # generates a summary that replaces older messages with a
+        # system summary while preserving the most recent turns
+        # verbatim. The summary preserves what the agent and user
+        # discussed without keeping every stale ``<ui_state>``
+        # snapshot in context.
+        auto_context_summarization_config = LLMAutoContextSummarizationConfig(
+            max_context_tokens=8000,
+            max_unsummarized_messages=20,
+            summary_config=LLMContextSummaryConfig(
+                target_context_tokens=6000,
+                min_messages_after_summary=4,
+            ),
+        )
+
+        super().__init__(
+            name,
+            bus=bus,
+            active=True,
+            keep_history=True,
+            assistant_params=LLMAssistantAggregatorParams(
+                enable_auto_context_summarization=True,
+                auto_context_summarization_config=auto_context_summarization_config,
+            ),
+        )
         self._state = UIState()
         self._seed_demo_favorites()
 
@@ -205,6 +246,20 @@ class UIAgent(BaseUIAgent):
                 model=os.getenv("OPENAI_MODEL"),
             ),
         )
+
+    async def on_ready(self) -> None:
+        await super().on_ready()
+        # Log when summarization fires so we have visibility into
+        # how often it's compressing the running session.
+
+        @self.assistant_aggregator.event_handler("on_summary_applied")
+        async def _on_summary_applied(_aggregator, _summarizer, event: SummaryAppliedEvent):
+            logger.info(
+                f"{self}: context summarized "
+                f"({event.original_message_count} → {event.new_message_count} messages, "
+                f"{event.summarized_message_count} compressed, "
+                f"{event.preserved_message_count} preserved)"
+            )
 
     async def on_activated(self, args: dict | None) -> None:
         # The root agent creates this UIAgent inside RTVI's
