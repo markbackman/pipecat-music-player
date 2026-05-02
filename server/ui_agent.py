@@ -45,11 +45,11 @@ from pipecat_subagents.agents import (
     tool,
 )
 from pipecat_subagents.agents import UIAgent as BaseUIAgent
+from pipecat_subagents.agents.ui.ui_messages import BusUIEventMessage
 from pipecat_subagents.bus import (
     AgentBus,
     BusTaskRequestMessage,
     BusTaskUpdateMessage,
-    BusUIEventMessage,
 )
 
 Screen = Literal["home", "artist", "detail", "trending", "discovery"]
