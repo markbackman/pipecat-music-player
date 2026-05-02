@@ -5,16 +5,18 @@ Two entry points:
 - ``on_task_request``: the voice agent delegates a natural-language
   request. The UI agent's LLM picks one tool based on the ``<ui_event>``
   context injected by ``UIAgent`` on every client click.
-- ``@on_ui_event(...)``: the client sends a ``ui.event`` (grid click or
+- ``@on_ui_event(...)``: the client sends a ``ui-event`` (grid click or
   Detail-screen button). Dispatched directly to the decorated handler
   without an LLM call; ``UIAgent`` auto-appends a ``<ui_event>``
   developer message so the LLM sees the user action on the next turn.
 
 All UI changes fan out through ``self.send_command(name, payload)``,
 which publishes a ``BusUICommandMessage``. The bridge installed by
-``attach_ui_bridge`` turns that into an ``RTVIServerMessageFrame`` on
-the root agent's pipeline so RTVI delivers it to the client. Every
-catalog lookup (seed listing, artist fetch, title resolution,
+``attach_ui_bridge`` turns that into an ``RTVIUICommandFrame`` (or
+``RTVIUITaskFrame`` for task-lifecycle traffic) on the root agent's
+pipeline; the RTVI observer wraps it into a ``ui-command`` /
+``ui-task`` envelope and the transport delivers it to the client.
+Every catalog lookup (seed listing, artist fetch, title resolution,
 description generation) goes through the long-lived ``CatalogAgent``
 via the bus.
 """
@@ -30,6 +32,7 @@ from pipecat.processors.aggregators.llm_context_summarizer import SummaryApplied
 from pipecat.processors.aggregators.llm_response_universal import (
     LLMAssistantAggregatorParams,
 )
+from pipecat.processors.frameworks.rtvi.models import ScrollTo, Toast
 from pipecat.services.llm_service import FunctionCallParams, LLMService
 from pipecat.services.openai.base_llm import OpenAILLMSettings
 from pipecat.services.openai.llm import OpenAILLMService
@@ -37,7 +40,6 @@ from pipecat.utils.context.llm_context_summarization import (
     LLMAutoContextSummarizationConfig,
     LLMContextSummaryConfig,
 )
-from pipecat.processors.frameworks.rtvi.models import ScrollTo, Toast
 from pipecat_subagents.agents import (
     UI_STATE_PROMPT_GUIDE,
     TaskStatus,
@@ -750,11 +752,12 @@ class UIAgent(BaseUIAgent):
     # unblocks immediately so it can move on without speaking.
     #
     # The SDK ships a bundled ``ReplyToolMixin`` whose ``reply(answer,
-    # scroll_to, highlight)`` tool requires a spoken answer. That
-    # shape doesn't match this app, where each tool call IS the whole
-    # turn (some speak via ``_respond``, some are silent like the two
-    # below). We override the helper methods on ``UIAgent`` to expose
-    # them as @tool-decorated, silent-terminating LLM tools.
+    # scroll_to, highlight, select_text, fills, click)`` tool requires
+    # a spoken answer. That shape doesn't match this app, where each
+    # tool call IS the whole turn (some speak via ``_respond``, some
+    # are silent like the two below). We override the helper methods
+    # on ``UIAgent`` to expose them as @tool-decorated,
+    # silent-terminating LLM tools.
 
     @tool
     async def scroll_to(self, params: FunctionCallParams, ref: str):

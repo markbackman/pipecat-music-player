@@ -8,22 +8,27 @@
 
 A ``VoiceAgent`` handles the conversation and a ``UIAgent`` owns the
 navigation stack and screen state. The voice agent delegates every UI
-request to the UI agent, which picks the right action with its own LLM
-and emits ``RTVIServerMessageFrame`` updates to the client. Client
-clicks flow back to the UI agent via a custom bus message and bypass
-the LLM for deterministic, low-latency updates.
+request to the UI agent, which picks the right action with its own
+LLM and emits typed ``ui-command`` / ``ui-task`` RTVI messages to the
+client. Client ``ui-event`` messages (grid clicks, action buttons)
+flow back to the UI agent via the SDK's ``attach_ui_bridge`` and
+dispatch through ``@on_ui_event`` handlers without running an LLM,
+for deterministic, low-latency updates.
 
 Architecture:
 
-    MusicAgent (transport + BusBridge + RTVI client-message listener)
+    MusicAgent (transport + BusBridge + attach_ui_bridge)
       ├── VoiceAgent (LLM, bridged)
       │     └── @tool handle_request(query)
       │           └── request_task("ui")
       └── UIAgent (LLM, not bridged)
             ├── tools: navigate_to_artist, select_item, play,
-            │          show_info, add_to_favorites, go_back,
-            │          go_home, describe_screen
-            └── on_bus_message: dispatches ui_context click events
+            │          control_playback, show_info, answer,
+            │          add_to_favorites, show_albums, show_songs,
+            │          show_similar_artists, show_trending,
+            │          start_discovery, scroll_to, highlight,
+            │          go_back, go_home, describe_screen
+            └── @on_ui_event: dispatches grid + action button clicks
 
 Run the server from this directory:
 
@@ -89,7 +94,7 @@ class MusicAgent(BaseAgent):
 
     async def on_ready(self) -> None:
         await super().on_ready()
-        # Forward client `ui.event` RTVI messages onto the bus so the
+        # Forward client `ui-event` RTVI messages onto the bus so the
         # UI agent can dispatch them without the voice agent mediating.
         attach_ui_bridge(self, target="ui")
 

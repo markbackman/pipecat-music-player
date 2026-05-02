@@ -28,7 +28,7 @@ function sourceLabel(source: string): string {
  * below; clicking a card plays the track.
  *
  * In-flight state comes from ``useUITasks`` (the React UITasksProvider
- * subscribes to ``ui.task`` envelopes from the SDK). Track state
+ * subscribes to ``ui-task`` envelopes from the SDK). Track state
  * comes from ``add_track`` custom commands handled in
  * ``useServerMessages`` and threaded down as a prop.
  */
