@@ -4,13 +4,14 @@ version = "0.1.0"
 description = "Music player demo powered by Pipecat Subagents"
 requires-python = ">=3.11"
 dependencies = [
-    "pipecat-ai[webrtc,daily,silero,soniox,cartesia,openai,runner]>=1.0.0",
-    "pipecat-ai-subagents>=0.3.0",
+    "pipecat-ai[webrtc,daily,silero,soniox,cartesia,openai,runner]>=1.1.0",
+    "pipecat-ai-subagents>=0.4.0",
     "pipecatcloud>=0.5.0",
 ]
 
 [tool.uv.sources]
-pipecat-ai-subagents = { path = "../../pipecat-subagents", editable = true }
+pipecat-ai-subagents = { git = "https://github.com/pipecat-ai/pipecat-subagents", branch = "mb/ui-agent" }
+pipecat-ai = { git = "https://github.com/pipecat-ai/pipecat", branch = "mb/ui-agent-wire-format" }
 
 [tool.ruff]
 line-length = 100
