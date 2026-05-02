@@ -37,11 +37,10 @@ from pipecat.utils.context.llm_context_summarization import (
     LLMAutoContextSummarizationConfig,
     LLMContextSummaryConfig,
 )
+from pipecat.processors.frameworks.rtvi.models import ScrollTo, Toast
 from pipecat_subagents.agents import (
     UI_STATE_PROMPT_GUIDE,
-    ScrollTo,
     TaskStatus,
-    Toast,
     on_ui_event,
     tool,
 )
