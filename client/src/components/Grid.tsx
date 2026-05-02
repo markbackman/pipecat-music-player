@@ -13,6 +13,8 @@ export function Grid({ columns, children, label, scrollTarget }: GridProps) {
       {label && <h2 className="grid-label">{label}</h2>}
       <div
         className="grid"
+        role="grid"
+        aria-colcount={columns}
         style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}
       >
         {children}

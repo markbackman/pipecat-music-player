@@ -1,7 +1,10 @@
 import { useEffect, useRef } from "react";
 import type { PipecatBaseChildProps } from "@pipecat-ai/voice-ui-kit";
-import { RTVIEvent } from "@pipecat-ai/client-js";
-import { useRTVIClientEvent } from "@pipecat-ai/client-react";
+import {
+  UIAgentProvider,
+  UITasksProvider,
+  useA11ySnapshot,
+} from "@pipecat-ai/client-react";
 import { useServerMessages } from "./hooks/useServerMessages";
 import { useClickSender } from "./hooks/useClickSender";
 import { Header } from "./components/Header";
@@ -10,6 +13,7 @@ import { Welcome } from "./screens/Welcome";
 import { Home } from "./screens/Home";
 import { Artist } from "./screens/Artist";
 import { Detail } from "./screens/Detail";
+import { Discovery } from "./screens/Discovery";
 import { Trending } from "./screens/Trending";
 import type { Screen } from "./types";
 
@@ -23,25 +27,32 @@ function screenIdentity(s: Screen): string {
       return `detail:${s.item.id}`;
     case "trending":
       return `trending:${s.genre ?? ""}`;
+    case "discovery":
+      return `discovery:${s.seedArtist.id}`;
   }
 }
 
-export function App({
-  handleConnect,
-  handleDisconnect,
-}: PipecatBaseChildProps) {
-  const { screen, toast, nowPlaying, closeToast } = useServerMessages();
+export function App(props: PipecatBaseChildProps) {
+  return (
+    <UIAgentProvider client={props.client ?? undefined}>
+      <UITasksProvider>
+        <AppInner {...props} />
+      </UITasksProvider>
+    </UIAgentProvider>
+  );
+}
+
+function AppInner({ handleConnect, handleDisconnect }: PipecatBaseChildProps) {
+  const { screen, toast, nowPlaying, discoveryTracks, closeToast } =
+    useServerMessages();
   const sendClick = useClickSender();
   const mainRef = useRef<HTMLElement>(null);
   const lastScreenId = useRef<string | null>(null);
 
-  // Ask the server to re-emit the current screen once both sides have
-  // finished the RTVI handshake. Emitting earlier (from the UI agent's
-  // on_activated) can race the client's listener registration and drop
-  // the frame.
-  useRTVIClientEvent(RTVIEvent.BotReady, () => {
-    sendClick({ kind: "hello" });
-  });
+  // Spike: stream an accessibility snapshot of the app to the server
+  // so the UI agent has structural awareness of what's on screen
+  // without hand-written prose descriptions.
+  useA11ySnapshot();
 
   // Reset the scroll position to the top whenever we land on a
   // different page. Same-page data updates (e.g. the Related Artists
@@ -72,7 +83,8 @@ export function App({
   const backEnabled =
     (screen.kind === "artist" ||
       screen.kind === "detail" ||
-      screen.kind === "trending") &&
+      screen.kind === "trending" ||
+      screen.kind === "discovery") &&
     screen.backEnabled;
 
   return (
@@ -156,6 +168,19 @@ export function App({
                 kind: "nav",
                 view: "artist",
                 artist_id: a.id,
+              })
+            }
+          />
+        )}
+        {screen.kind === "discovery" && (
+          <Discovery
+            seedArtist={screen.seedArtist}
+            tracks={discoveryTracks}
+            onPlayTrack={(track) =>
+              sendClick({
+                kind: "track_click",
+                artist_id: track.artist_id,
+                track_id: track.id,
               })
             }
           />

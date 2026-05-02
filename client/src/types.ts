@@ -66,6 +66,23 @@ export interface NewRelease {
 
 export type ArtistTab = "albums" | "songs" | "related";
 
+export interface DiscoveryTrack {
+  id: string;
+  title: string;
+  artist_id: string;
+  artist_name: string;
+  album_id: string;
+  album_title: string;
+  preview_url?: string;
+  cover_url?: string;
+  duration_seconds?: number;
+  /**
+   * Worker that surfaced this track: ``"similar_artist"``, ``"genre"``,
+   * or ``"chart"``. The Discovery screen uses this to label cards.
+   */
+  source: string;
+}
+
 export type Screen =
   | {
       kind: "home";
@@ -95,6 +112,11 @@ export type Screen =
       genre: string | null;
       artists: MinimalArtist[];
       backEnabled: boolean;
+    }
+  | {
+      kind: "discovery";
+      seedArtist: MinimalArtist;
+      backEnabled: boolean;
     };
 
 export interface Toast {
@@ -103,68 +125,6 @@ export interface Toast {
   subtitle?: string;
   image_url?: string;
 }
-
-export type ServerMessage =
-  | {
-      type: "screen";
-      screen: "home";
-      artists: MinimalArtist[];
-      new_releases: NewRelease[];
-      favorites: Favorite[];
-    }
-  | {
-      type: "screen";
-      screen: "artist";
-      artist: Artist;
-      active_tab: ArtistTab;
-      back_enabled: boolean;
-    }
-  | {
-      type: "screen";
-      screen: "detail";
-      kind: "album" | "song";
-      item: Album | Song;
-      artist: Artist;
-      is_favorite: boolean;
-      is_playing: boolean;
-      playing_track_id?: string | null;
-      back_enabled: boolean;
-    }
-  | {
-      type: "screen";
-      screen: "trending";
-      label: string;
-      genre: string | null;
-      artists: MinimalArtist[];
-      back_enabled: boolean;
-    }
-  | {
-      type: "toast";
-      title: string;
-      description: string;
-      subtitle?: string;
-      image_url?: string;
-    }
-  | {
-      type: "playback";
-      state: "playing" | "stopped";
-      item_title: string;
-      item_id: string;
-      preview_url?: string;
-    }
-  | {
-      type: "playback_control";
-      action: "pause" | "resume" | "stop";
-    }
-  | {
-      type: "scroll_to";
-      target: string;
-    }
-  | {
-      type: "favorite_added";
-      favorite: Favorite;
-      favorites: Favorite[];
-    };
 
 export type ClickEvent =
   | { kind: "nav"; view: "home" }
@@ -192,5 +152,10 @@ export type ClickEvent =
       kind: "play_track";
       artist_id: string;
       album_id: string;
+      track_id: string;
+    }
+  | {
+      kind: "track_click";
+      artist_id: string;
       track_id: string;
     };
