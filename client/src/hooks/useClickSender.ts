@@ -1,16 +1,14 @@
 import { useCallback } from "react";
-import { usePipecatClient } from "@pipecat-ai/client-react";
+import { useUIEventSender } from "@pipecat-ai/client-react";
 import type { ClickEvent } from "../types";
 
-type OutboundMessage = ClickEvent | { kind: "hello" };
-
 export function useClickSender() {
-  const client = usePipecatClient();
+  const sendEvent = useUIEventSender();
   return useCallback(
-    (event: OutboundMessage) => {
-      if (!client) return;
-      client.sendClientMessage("ui_context", event);
+    (event: ClickEvent) => {
+      const { kind, ...payload } = event;
+      sendEvent(kind, payload);
     },
-    [client],
+    [sendEvent],
   );
 }

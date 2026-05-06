@@ -18,6 +18,15 @@ USER_AGENT = "music-player-demo/1.0 (+pipecat-subagents)"
 RETRY_BACKOFF_S = 3.0
 REQUEST_TIMEOUT_S = 15.0
 
+# Cap concurrent in-flight Deezer requests. The free tier IP-level
+# quota is roughly 50 requests per 5 seconds; staying under ~4
+# concurrent keeps headroom for the once-per-call retry sleep when
+# we do trip the limit, and prevents fan-out paths (home warm-up,
+# discovery workers) from melting the catalog with simultaneous
+# bursts. The semaphore wraps the whole retry sequence so a backed-
+# off call doesn't yield its slot mid-attempt.
+_REQUEST_SEMAPHORE = asyncio.Semaphore(4)
+
 
 def normalize_name(s: str) -> str:
     """Lowercase, collapse non-alphanumeric runs to single spaces, strip ends."""
@@ -48,17 +57,18 @@ async def get_json(url: str) -> dict | list:
     empty result, so a warmup flood that trips the limit just yields
     empty caches rather than breaking later lookups.
     """
-    for attempt in range(2):
-        data = await asyncio.to_thread(_sync_get, url)
-        if isinstance(data, dict):
-            err = data.get("error")
-            if isinstance(err, dict) and err.get("code") is not None:
-                if attempt == 0:
-                    await asyncio.sleep(RETRY_BACKOFF_S)
-                    continue
-                raise RuntimeError(f"Deezer API error: {err}")
-        return data
-    return data  # unreachable; loop always returns or raises.
+    async with _REQUEST_SEMAPHORE:
+        for attempt in range(2):
+            data = await asyncio.to_thread(_sync_get, url)
+            if isinstance(data, dict):
+                err = data.get("error")
+                if isinstance(err, dict) and err.get("code") is not None:
+                    if attempt == 0:
+                        await asyncio.sleep(RETRY_BACKOFF_S)
+                        continue
+                    raise RuntimeError(f"Deezer API error: {err}")
+            return data
+        return data  # unreachable; loop always returns or raises.
 
 
 async def search_artist(name: str) -> dict | None:

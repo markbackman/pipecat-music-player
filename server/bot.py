@@ -8,22 +8,27 @@
 
 A ``VoiceAgent`` handles the conversation and a ``UIAgent`` owns the
 navigation stack and screen state. The voice agent delegates every UI
-request to the UI agent, which picks the right action with its own LLM
-and emits ``RTVIServerMessageFrame`` updates to the client. Client
-clicks flow back to the UI agent via a custom bus message and bypass
-the LLM for deterministic, low-latency updates.
+request to the UI agent, which picks the right action with its own
+LLM and emits typed ``ui-command`` / ``ui-task`` RTVI messages to the
+client. Client ``ui-event`` messages (grid clicks, action buttons)
+flow back to the UI agent via the SDK's ``attach_ui_bridge`` and
+dispatch through ``@on_ui_event`` handlers without running an LLM,
+for deterministic, low-latency updates.
 
 Architecture:
 
-    MusicAgent (transport + BusBridge + RTVI client-message listener)
+    MusicAgent (transport + BusBridge + attach_ui_bridge)
       ├── VoiceAgent (LLM, bridged)
       │     └── @tool handle_request(query)
       │           └── request_task("ui")
       └── UIAgent (LLM, not bridged)
             ├── tools: navigate_to_artist, select_item, play,
-            │          show_info, add_to_favorites, go_back,
-            │          go_home, describe_screen
-            └── on_bus_message: dispatches ui_context click events
+            │          control_playback, show_info, answer,
+            │          add_to_favorites, show_albums, show_songs,
+            │          show_similar_artists, show_trending,
+            │          start_discovery, scroll_to, highlight,
+            │          go_back, go_home, describe_screen
+            └── @on_ui_event: dispatches grid + action button clicks
 
 Run the server from this directory:
 
@@ -58,13 +63,22 @@ from pipecat.services.soniox.stt import SonioxSTTService
 from pipecat.transcriptions.language import Language
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.daily.transport import DailyParams
-from pipecat_subagents.agents import BaseAgent, LLMAgentActivationArgs, agent_ready
+from pipecat_subagents.agents import (
+    BaseAgent,
+    LLMAgentActivationArgs,
+    agent_ready,
+    attach_ui_bridge,
+)
 from pipecat_subagents.bus import BusBridgeProcessor
 from pipecat_subagents.runner import AgentRunner
 from pipecat_subagents.types import AgentReadyData
 
 from catalog_agent import CatalogAgent
-from messages import BusUIContextMessage
+from discovery_workers import (
+    GenreRecommender,
+    SimilarArtistRecommender,
+    TwoHopRecommender,
+)
 from ui_agent import UIAgent
 from voice_agent import VoiceAgent
 
@@ -80,20 +94,31 @@ class MusicAgent(BaseAgent):
 
     async def on_ready(self) -> None:
         await super().on_ready()
+        # Forward client `ui-event` RTVI messages onto the bus so the
+        # UI agent can dispatch them without the voice agent mediating.
+        attach_ui_bridge(self, target="ui")
 
-        # Forward UI click events from the RTVI client into the bus so
-        # the UI agent can react without the voice agent mediating.
-        @self.pipeline_task.rtvi.event_handler("on_client_message")
-        async def on_client_message(rtvi, msg):
-            if msg.type != "ui_context":
-                return
-            await self._bus.send(
-                BusUIContextMessage(
-                    source=self.name,
-                    target="ui",
-                    data=msg.data,
-                )
-            )
+        # Create voice + UI agents after the RTVI handshake completes so
+        # the client is already subscribed to server messages by the
+        # time UIAgent.on_activated emits the initial screen.
+        @self.pipeline_task.rtvi.event_handler("on_client_ready")
+        async def on_client_ready(rtvi):
+            logger.info("Client ready")
+            voice = VoiceAgent("voice", bus=self.bus)
+            ui = UIAgent("ui", bus=self.bus)
+            await self.add_agent(voice)
+            await self.add_agent(ui)
+            # Discovery workers — short-lived helpers added alongside
+            # the UI agent. The UI agent's ``start_discovery`` tool
+            # dispatches a ``user_task_group`` against these names;
+            # each worker pulls candidate artists from a different
+            # angle and streams tracks back via task updates.
+            for cls in (
+                SimilarArtistRecommender,
+                GenreRecommender,
+                TwoHopRecommender,
+            ):
+                await self.add_agent(cls(cls.source, bus=self.bus))
 
     @agent_ready(name="voice")
     async def on_voice_ready(self, data: AgentReadyData) -> None:
@@ -153,10 +178,6 @@ class MusicAgent(BaseAgent):
         @self._transport.event_handler("on_client_connected")
         async def on_client_connected(transport, client):
             logger.info("Client connected")
-            voice = VoiceAgent("voice", bus=self.bus)
-            ui = UIAgent("ui", bus=self.bus)
-            await self.add_agent(voice)
-            await self.add_agent(ui)
 
         @self._transport.event_handler("on_client_disconnected")
         async def on_client_disconnected(transport, client):
