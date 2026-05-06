@@ -12,7 +12,7 @@ import { defineConfig } from "vite";
 //   (`@pipecat-ai/voice-ui-kit`) ship their own resolution; without
 //   dedupe they'd import a second copy, `PipecatClientProvider` would
 //   publish to one React context and our `usePipecatClient` would
-//   read from another, so `UIAgentClient` never gets built.
+//   read from another, so UI hooks would not see the active client.
 // - The local pipecat-client-web workspace has its own React 18 in
 //   `node_modules` (from its devDependencies); without dedupe that
 //   copy coexists with the app's React 19 and hooks fail with

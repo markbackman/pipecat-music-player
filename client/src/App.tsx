@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import type { PipecatBaseChildProps } from "@pipecat-ai/voice-ui-kit";
 import {
-  UIAgentProvider,
+  PipecatClientProvider,
   UITasksProvider,
   useA11ySnapshot,
 } from "@pipecat-ai/client-react";
@@ -33,12 +33,13 @@ function screenIdentity(s: Screen): string {
 }
 
 export function App(props: PipecatBaseChildProps) {
+  if (!props.client) return null;
   return (
-    <UIAgentProvider client={props.client ?? undefined}>
+    <PipecatClientProvider client={props.client}>
       <UITasksProvider>
         <AppInner {...props} />
       </UITasksProvider>
-    </UIAgentProvider>
+    </PipecatClientProvider>
   );
 }
 
